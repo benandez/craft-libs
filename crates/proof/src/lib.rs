@@ -52,11 +52,80 @@ pub fn user_dictionary() -> Vec<String> {
 const COMMON: &str = "a an the and or but if of to in on at by for with from as is am are was were be been being it its we us our you your he him his she her they them their i me my mine this that these those there here what which who whom whose when where why how all any both each few more most other some such no nor not only own same so than too very can will just should now do does did done has have had having may might must shall would could up down out over under again further then once off into onto upon about above below between through during before after until while because per via vs etc ok yes yeah oh ah hi hey bye one two three four five six seven eight nine ten first last next new old get got go goes went gone see saw seen say said make made take took come came give gave know knew think thought look want need use used find found tell told ask asked feel felt try left keep let put mean set run show turn move live play pay hear hold bring begin seem help talk start might";
 
 const EXTRA: &[&str] = &[
-    "don't", "doesn't", "didn't", "can't", "won't", "isn't", "aren't", "wasn't", "weren't", "shouldn't", "wouldn't", "couldn't", "i'm", "i've", "i'd", "i'll",
-    "you're", "you've", "you'll", "you'd", "we're", "we've", "we'll", "they're", "they've", "they'll", "it's", "that's", "there's", "here's", "what's", "let's",
-    "email", "emails", "online", "website", "websites", "internet", "software", "app", "apps", "smartphone", "blog", "login", "logout", "username", "wifi",
-    "toolbar", "workflow", "workflows", "dataset", "datasets", "metadata", "startup", "startups", "covid", "selfie", "podcast", "podcasts", "hashtag",
-    "wordcraft", "artcraft", "discord", "github", "rust", "ok", "okay", "unlabelled", "labelled", "colour", "colours", "favourite", "centre", "organise",
+    "don't",
+    "doesn't",
+    "didn't",
+    "can't",
+    "won't",
+    "isn't",
+    "aren't",
+    "wasn't",
+    "weren't",
+    "shouldn't",
+    "wouldn't",
+    "couldn't",
+    "i'm",
+    "i've",
+    "i'd",
+    "i'll",
+    "you're",
+    "you've",
+    "you'll",
+    "you'd",
+    "we're",
+    "we've",
+    "we'll",
+    "they're",
+    "they've",
+    "they'll",
+    "it's",
+    "that's",
+    "there's",
+    "here's",
+    "what's",
+    "let's",
+    "email",
+    "emails",
+    "online",
+    "website",
+    "websites",
+    "internet",
+    "software",
+    "app",
+    "apps",
+    "smartphone",
+    "blog",
+    "login",
+    "logout",
+    "username",
+    "wifi",
+    "toolbar",
+    "workflow",
+    "workflows",
+    "dataset",
+    "datasets",
+    "metadata",
+    "startup",
+    "startups",
+    "covid",
+    "selfie",
+    "podcast",
+    "podcasts",
+    "hashtag",
+    "wordcraft",
+    "artcraft",
+    "discord",
+    "github",
+    "rust",
+    "ok",
+    "okay",
+    "unlabelled",
+    "labelled",
+    "colour",
+    "colours",
+    "favourite",
+    "centre",
+    "organise",
 ];
 
 fn known_core(w: &str) -> bool {
@@ -94,12 +163,13 @@ fn known_core(w: &str) -> bool {
             }
             // Doubled consonant: running → run, stopped → stop.
             let b = stem.as_bytes();
-            if (suf == "ing" || suf == "ed" || suf == "er" || suf == "est") && b.len() >= 3 && b.get(b.len() - 1) == b.get(b.len() - 2) {
-                if let Some(s) = stem.get(..stem.len() - 1)
-                    && d.get(s).is_some()
-                {
-                    return true;
-                }
+            if (suf == "ing" || suf == "ed" || suf == "er" || suf == "est")
+                && b.len() >= 3
+                && b.last() == b.get(b.len() - 2)
+                && let Some(s) = stem.get(..stem.len() - 1)
+                && d.get(s).is_some()
+            {
+                return true;
             }
         }
     }
@@ -195,7 +265,9 @@ fn damerau(a: &[char], b: &str) -> usize {
         for j in 1..=m {
             let (ai, bj) = (a.get(i - 1), b.get(j - 1));
             let cost = usize::from(ai != bj);
-            let mut v = (prev.get(j).copied().unwrap_or(9) + 1).min(cur.get(j - 1).copied().unwrap_or(9) + 1).min(prev.get(j - 1).copied().unwrap_or(9) + cost);
+            let mut v = (prev.get(j).copied().unwrap_or(9) + 1)
+                .min(cur.get(j - 1).copied().unwrap_or(9) + 1)
+                .min(prev.get(j - 1).copied().unwrap_or(9) + cost);
             if i > 1 && j > 1 && a.get(i - 1) == b.get(j - 2) && a.get(i - 2) == b.get(j - 1) {
                 v = v.min(prev2.get(j - 2).copied().unwrap_or(9) + 1);
             }
@@ -268,14 +340,40 @@ pub fn check_grammar(text: &str) -> Vec<Issue> {
     for pair in ws.windows(2) {
         let [(a0, b0), (a1, b1)] = pair else { continue };
         let (Some(w0), Some(w1), Some(gap)) = (text.get(*a0..*b0), text.get(*a1..*b1), text.get(*b0..*a1)) else { continue };
-        if gap.trim().is_empty() && w0.eq_ignore_ascii_case(w1) && w0.chars().all(char::is_alphabetic) && !matches!(w0.to_lowercase().as_str(), "had" | "that" | "bye" | "so") {
-            v.push(Issue { start: *a0, end: *b1, kind: IssueKind::Grammar, message: format!("Repeated word: \"{w1}\""), suggestions: vec![w0.to_string()] });
+        if gap.trim().is_empty()
+            && w0.eq_ignore_ascii_case(w1)
+            && w0.chars().all(char::is_alphabetic)
+            && !matches!(w0.to_lowercase().as_str(), "had" | "that" | "bye" | "so")
+        {
+            v.push(Issue {
+                start: *a0,
+                end: *b1,
+                kind: IssueKind::Grammar,
+                message: format!("Repeated word: \"{w1}\""),
+                suggestions: vec![w0.to_string()],
+            });
         }
         if gap == " " && (w0 == "a" || w0 == "A") && w1.chars().next().is_some_and(|c| "aeiouAEIOU".contains(c)) && !starts_consonant_sound(w1) {
-            v.push(Issue { start: *a0, end: *b0, kind: IssueKind::Grammar, message: "Use \"an\" before a vowel sound".into(), suggestions: vec![if w0 == "A" { "An" } else { "an" }.into()] });
+            v.push(Issue {
+                start: *a0,
+                end: *b0,
+                kind: IssueKind::Grammar,
+                message: "Use \"an\" before a vowel sound".into(),
+                suggestions: vec![if w0 == "A" { "An" } else { "an" }.into()],
+            });
         }
-        if gap == " " && (w0 == "an" || w0 == "An") && w1.chars().next().is_some_and(|c| c.is_alphabetic() && !"aeiouAEIOUhH".contains(c)) && !w1.chars().all(|c| c.is_uppercase()) {
-            v.push(Issue { start: *a0, end: *b0, kind: IssueKind::Grammar, message: "Use \"a\" before a consonant sound".into(), suggestions: vec![if w0 == "An" { "A" } else { "a" }.into()] });
+        if gap == " "
+            && (w0 == "an" || w0 == "An")
+            && w1.chars().next().is_some_and(|c| c.is_alphabetic() && !"aeiouAEIOUhH".contains(c))
+            && !w1.chars().all(|c| c.is_uppercase())
+        {
+            v.push(Issue {
+                start: *a0,
+                end: *b0,
+                kind: IssueKind::Grammar,
+                message: "Use \"a\" before a consonant sound".into(),
+                suggestions: vec![if w0 == "An" { "A" } else { "a" }.into()],
+            });
         }
     }
     // Space before punctuation; doubled spaces.
@@ -283,7 +381,13 @@ pub fn check_grammar(text: &str) -> Vec<Issue> {
         if text.get(i + 2..).is_some_and(|r| r.starts_with('.') || r.starts_with(',')) {
             continue; // "..." or numbers like " .5"
         }
-        v.push(Issue { start: i, end: i + 2, kind: IssueKind::Grammar, message: "Remove the space before the punctuation".into(), suggestions: vec![text.get(i + 1..i + 2).unwrap_or("").to_string()] });
+        v.push(Issue {
+            start: i,
+            end: i + 2,
+            kind: IssueKind::Grammar,
+            message: "Remove the space before the punctuation".into(),
+            suggestions: vec![text.get(i + 1..i + 2).unwrap_or("").to_string()],
+        });
     }
     for (i, _) in text.match_indices("  ") {
         if i > 0 && text.get(..i).is_some_and(|t| t.ends_with(' ')) {
@@ -297,7 +401,13 @@ pub fn check_grammar(text: &str) -> Vec<Issue> {
         let Some(w) = text.get(*a..*b) else { continue };
         if after_end && w.chars().next().is_some_and(char::is_lowercase) && w.chars().all(char::is_alphabetic) {
             let fixed: String = w.chars().next().map(|f| f.to_uppercase().chain(w.chars().skip(1)).collect()).unwrap_or_default();
-            v.push(Issue { start: *a, end: *b, kind: IssueKind::Grammar, message: "Capitalize the first word of a sentence".into(), suggestions: vec![fixed] });
+            v.push(Issue {
+                start: *a,
+                end: *b,
+                kind: IssueKind::Grammar,
+                message: "Capitalize the first word of a sentence".into(),
+                suggestions: vec![fixed],
+            });
         }
         let tail = text.get(*b..).unwrap_or("");
         let next_non_space = tail.trim_start_matches(['"', '”', ')', '\'']).chars().next();
@@ -323,7 +433,23 @@ mod tests {
 
     #[test]
     fn spelling() {
-        for w in ["if", "we", "hello", "world", "running", "studios", "don't", "Thursday", "NASA", "2026", "co-operate", "unhappy", "colour", "it's", "stopped"] {
+        for w in [
+            "if",
+            "we",
+            "hello",
+            "world",
+            "running",
+            "studios",
+            "don't",
+            "Thursday",
+            "NASA",
+            "2026",
+            "co-operate",
+            "unhappy",
+            "colour",
+            "it's",
+            "stopped",
+        ] {
             assert!(is_correct(w), "{w}");
         }
         for w in ["helo", "wrold", "sentense", "recieve"] {
@@ -366,7 +492,7 @@ mod tests {
     #[test]
     fn hyphenation() {
         let l = hyphen::Limits::default();
-        assert_eq!(hyphen::hyphenate_word("hyphenation", &l).matches('-').count() >= 2, true);
+        assert!(hyphen::hyphenate_word("hyphenation", &l).matches('-').count() >= 2);
     }
 
     proptest::proptest! {

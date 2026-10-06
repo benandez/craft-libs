@@ -128,6 +128,7 @@ impl Patterns {
         true
     }
 
+    #[allow(dead_code)]
     pub(crate) fn from_parts(alpha: Alphabet, map: FxMap<u64, Box<[u8]>>, max_len: usize) -> Patterns {
         Patterns { alpha, map, max_len }
     }
