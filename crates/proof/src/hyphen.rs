@@ -13,6 +13,8 @@
 //! Kołodziejska, Bogusław Jackowski and Marek Ryćko, MIT licence option), then a Polish syllable
 //! heuristic for words with letters outside the Polish alphabet (`é`, `ü`…).
 //!
+//! **Bulgarian**: the Bulgarian syllable rules ([`crate::bg`]); no pattern file or word list.
+//!
 //! Then the paragraph's limits ([`Limits`]) are applied.
 
 pub use crate::dict;
@@ -89,6 +91,8 @@ pub enum Source {
     Dictionary,
     Patterns,
     Heuristic,
+    /// A language's syllable rules (Bulgarian, [`crate::bg`]).
+    Rules,
     None,
 }
 
@@ -108,6 +112,11 @@ fn core_breaks(core: &[char], lang: ProofLang) -> (Vec<usize>, Source) {
     }
     if lang == ProofLang::Pl {
         return core_breaks_pl(core);
+    }
+    // Bulgarian words follow the Bulgarian syllable rules; Latin-script words in a Bulgarian run
+    // (`WordCraft`, `email`) are hyphenated as English, as in any other language.
+    if lang == ProofLang::Bg && core.iter().all(|&c| crate::bg::is_letter(c)) {
+        return (crate::bg::points(core), Source::Rules);
     }
     if lang == ProofLang::Pt {
         return core_breaks_pt(core);
@@ -776,6 +785,21 @@ mod tests {
     fn languages_without_patterns_keep_the_english_ones() {
         for w in ["hyphenation", "typography", "internationalization"] {
             assert_eq!(hyphen_points_in(w, &Limits::default(), ProofLang::Other), hyphen_points(w, &Limits::default()), "{w}");
+        }
+    }
+
+    #[test]
+    fn bulgarian_words_follow_the_bulgarian_rules() {
+        let bg = |w: &str| hyphenate_word_in(w, &Limits::default(), ProofLang::Bg);
+        assert_eq!(bg("сричкопренасяне"), "срич-ко-пре-на-ся-не");
+        assert_eq!(bg("Таблица"), "Та-бли-ца");
+        // A single letter is never left on a line (the paragraph limits): България, not Бъл-га-ри-я.
+        assert_eq!(bg("България"), "Бъл-га-рия");
+        assert_eq!(bg("„шофьор“,"), "„шо-фьор“,");
+        assert_eq!(word_breaks_in("таблица", ProofLang::Bg).1, Source::Rules);
+        // Latin words in a Bulgarian run are hyphenated as English.
+        for w in ["publication", "WordCraft"] {
+            assert_eq!(hyphen_points_in(w, &Limits::default(), ProofLang::Bg), hyphen_points(w, &Limits::default()), "{w}");
         }
     }
 }
