@@ -1,20 +1,34 @@
-//! WordCraft proofing.
+//! WordCraft proofing, per language. A run's language (its BCP 47 tag) picks the tools through
+//! [`ProofLang`]; the `*_in` functions take it, the older English-only ones remain.
 //!
-//! - **Spelling** against the public-domain Moby word list (~160k words, the same list that
-//!   drives hyphenation) plus our supplement of modern words it lacks
-//!   (`assets/spelling/en-extra.txt`: `desktop`, `email`, `download`…), with inflections (`-s`,
-//!   `-es`, `-ed`, `-ing`, `-ly`, `'s`…), a user dictionary and ignore lists; suggestions by edit
-//!   distance.
-//! - **Grammar** checks that are cheap and reliable: repeated words, `a`/`an`, capital letter
-//!   after a sentence end, spaces before punctuation, doubled spaces.
-//! - **Hyphenation** ([`hyphen`]): dictionary, Liang patterns, heuristic.
+//! - **English** ([`ProofLang::En`]; also text with no language): spelling against the
+//!   public-domain Moby word list (~160k words, the same list that drives hyphenation) plus our
+//!   supplement of modern words it lacks (`assets/spelling/en-extra.txt`: `desktop`, `email`,
+//!   `download`…), with inflections (`-s`, `-es`, `-ed`, `-ing`, `-ly`, `'s`…), a user dictionary and ignore lists;
+//!   suggestions by edit distance. Grammar checks that are cheap and reliable: repeated words,
+//!   `a`/`an`, capital letter after a sentence end, spaces before punctuation, doubled spaces.
+//! - **Polish** ([`ProofLang::Pl`], module [`pl`]): spelling against the Hunspell `pl_PL`
+//!   dictionary installed on the system ([`hunspell`]; not bundled, so without it Polish has no
+//!   spelling marks), read by the affix engine ([`affix`]), suggestions tuned for Polish
+//!   (diacritics, `ż`/`rz`, `u`/`ó`, missing spaces), and Polish grammar rules with Polish
+//!   messages.
+//! - **Other languages** ([`ProofLang::Other`]): no spelling or grammar marks, like Word without
+//!   the language's proofing tools.
+//! - **Hyphenation** ([`hyphen`]): dictionary, Liang patterns (English, Polish), heuristic.
+//!
+//! [`check_text`] checks a paragraph whose runs are in different languages.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod affix;
 pub mod dict;
+pub mod hunspell;
 pub mod hyphen;
+pub mod lang;
 pub mod patterns;
+pub mod pl;
 
 use std::collections::HashSet;
+use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
 
@@ -35,14 +49,20 @@ impl Default for Options {
     }
 }
 
+pub use lang::ProofLang;
+
 /// A problem found in text: byte range, kind, message and suggestions.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Issue {
     pub start: usize,
     pub end: usize,
     pub kind: IssueKind,
+    /// In the language of the text it was found in (Polish rules explain in Polish).
     pub message: String,
     pub suggestions: Vec<String>,
+    /// The language the text was checked in: spelling suggestions come from its dictionary
+    /// ([`suggest_in`]).
+    pub lang: ProofLang,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,7 +79,7 @@ fn user_words() -> &'static RwLock<HashSet<String>> {
 /// Bumped whenever the user dictionary changes, so cached proofing results can be dropped.
 static DICTIONARY_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// Add a word to the user dictionary ("Add to Dictionary").
+/// Add a word to the user dictionary ("Add to Dictionary"). It applies to every language.
 pub fn add_word(w: &str) {
     if user_words().write().unwrap_or_else(|e| e.into_inner()).insert(w.to_lowercase()) {
         DICTIONARY_GENERATION.fetch_add(1, Ordering::Relaxed);
@@ -78,6 +98,11 @@ pub fn remove_word(w: &str) -> bool {
 /// A number that changes whenever a word is added to or removed from the user dictionary.
 pub fn dictionary_generation() -> u64 {
     DICTIONARY_GENERATION.load(Ordering::Relaxed)
+}
+
+/// Is `lower` (a lower-case word) in the user dictionary?
+pub(crate) fn in_user_dictionary(lower: &str) -> bool {
+    user_words().read().unwrap_or_else(|e| e.into_inner()).contains(lower)
 }
 
 /// Words in the user dictionary.
@@ -161,24 +186,28 @@ fn known_core(w: &str) -> bool {
     false
 }
 
-/// Is `word` spelled correctly? Numbers, single letters, words in capitals and words with
-/// digits are accepted (Word's default [`Options`]).
+/// Is `word` spelled correctly? Numbers, single letters, ALL-CAPS acronyms, URLs and words with
+/// digits are accepted.
 pub fn is_correct(word: &str) -> bool {
     is_correct_with(word, &Options::default())
+}
+
+/// The words every language's check accepts under `opts`: single letters, words without
+/// letters, words with digits (Ignore words that contain numbers) and words in capitals
+/// (Ignore words in UPPERCASE).
+fn accepted_by_options(word: &str, opts: &Options) -> bool {
+    let w = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'').trim_matches('\'');
+    w.chars().count() <= 1
+        || !w.chars().any(char::is_alphabetic)
+        || (opts.ignore_numbers && w.chars().any(|c| c.is_ascii_digit()))
+        || (opts.ignore_uppercase && w.chars().all(|c| !c.is_lowercase()))
 }
 
 /// [`is_correct`] with the File › Options › Proofing choices.
 pub fn is_correct_with(word: &str, opts: &Options) -> bool {
     let w = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'');
     let w = w.trim_matches('\'');
-    if w.chars().count() <= 1 || !w.chars().any(char::is_alphabetic) {
-        return true;
-    }
-    let digits = w.chars().any(|c| c.is_ascii_digit());
-    if digits && opts.ignore_numbers {
-        return true;
-    }
-    if opts.ignore_uppercase && w.chars().all(|c| !c.is_lowercase()) {
+    if accepted_by_options(w, opts) {
         return true;
     }
     if !w.is_ascii() && !w.chars().any(|c| c.is_ascii_alphabetic()) {
@@ -299,31 +328,129 @@ pub fn words(text: &str) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// Spelling issues in a paragraph of text (no suggestions; ask [`suggest`] on demand).
+/// Spelling issues in a paragraph of English text (no suggestions; ask [`suggest`] on demand).
 pub fn check_spelling(text: &str) -> Vec<Issue> {
     check_spelling_with(text, &Options::default())
 }
 
 /// [`check_spelling`] with the File › Options › Proofing choices.
 pub fn check_spelling_with(text: &str, opts: &Options) -> Vec<Issue> {
-    let mut v = Vec::new();
-    for (a, b) in words(text) {
-        let Some(w) = text.get(a..b) else { continue };
-        // Skip URLs/emails.
-        let ts = text.get(..a).and_then(|t| t.rfind(char::is_whitespace)).map(|i| i + 1).unwrap_or(0);
-        let te = text.get(b..).and_then(|t| t.find(char::is_whitespace)).map(|i| b + i).unwrap_or(text.len());
-        let token = text.get(ts..te).unwrap_or("");
-        if opts.ignore_internet && (token.contains("://") || token.contains('@') || token.starts_with("www.")) {
-            continue;
-        }
-        if !is_correct_with(w, opts) {
-            v.push(Issue { start: a, end: b, kind: IssueKind::Spelling, message: "Possible spelling mistake".into(), suggestions: Vec::new() });
+    words(text).into_iter().filter_map(|(a, b)| spelling_issue(text, a, b, ProofLang::En, opts)).collect()
+}
+
+/// Spelling issues in a paragraph of text in `lang` (none for a language without a dictionary;
+/// no suggestions: ask [`suggest_in`] on demand).
+pub fn check_spelling_in(text: &str, lang: ProofLang) -> Vec<Issue> {
+    if !lang.is_proofed() {
+        return Vec::new();
+    }
+    words(text).into_iter().filter_map(|(a, b)| spelling_issue(text, a, b, lang, &Options::default())).collect()
+}
+
+/// The spelling issue of the word at `a..b` of `text`, if it is misspelled in `lang`. Words in
+/// web and e-mail addresses are skipped (unless `opts` says otherwise).
+fn spelling_issue(text: &str, a: usize, b: usize, lang: ProofLang, opts: &Options) -> Option<Issue> {
+    let w = text.get(a..b)?;
+    let ts = text.get(..a).and_then(|t| t.rfind(char::is_whitespace)).map(|i| i + 1).unwrap_or(0);
+    let te = text.get(b..).and_then(|t| t.find(char::is_whitespace)).map(|i| b + i).unwrap_or(text.len());
+    let token = text.get(ts..te).unwrap_or("");
+    let internet = token.contains("://") || token.contains('@') || token.starts_with("www.");
+    if (opts.ignore_internet && internet) || is_correct_in_with(w, lang, opts) {
+        return None;
+    }
+    let message = match lang {
+        ProofLang::Pl => "Możliwy błąd pisowni",
+        _ => "Possible spelling mistake",
+    };
+    Some(Issue { start: a, end: b, kind: IssueKind::Spelling, message: message.into(), suggestions: Vec::new(), lang })
+}
+
+/// Is `word` spelled correctly in `lang`? Always true in a language without a dictionary.
+pub fn is_correct_in(word: &str, lang: ProofLang) -> bool {
+    is_correct_in_with(word, lang, &Options::default())
+}
+
+/// [`is_correct_in`] with the File › Options › Proofing choices.
+pub fn is_correct_in_with(word: &str, lang: ProofLang, opts: &Options) -> bool {
+    match lang {
+        ProofLang::En => is_correct_with(word, opts),
+        ProofLang::Pl => accepted_by_options(word, opts) || pl::is_correct(word),
+        ProofLang::Other => true,
+    }
+}
+
+/// Spelling suggestions for a word misspelled in `lang` (best first, at most `max`).
+pub fn suggest_in(word: &str, max: usize, lang: ProofLang) -> Vec<String> {
+    match lang {
+        ProofLang::En => suggest(word, max),
+        ProofLang::Pl => pl::suggest(word, max),
+        ProofLang::Other => Vec::new(),
+    }
+}
+
+/// Grammar issues in a paragraph of text in `lang`: the English rules, the Polish ones
+/// ([`pl::grammar`]), or none for a language WordCraft doesn't proof.
+pub fn check_grammar_in(text: &str, lang: ProofLang) -> Vec<Issue> {
+    match lang {
+        ProofLang::En => check_grammar(text),
+        ProofLang::Pl => pl::grammar::check(text),
+        ProofLang::Other => Vec::new(),
+    }
+}
+
+/// Spelling and grammar issues in a paragraph whose text is in several languages, in order.
+/// `spans` gives the language of byte ranges of `text` (in order, not overlapping); text outside
+/// them is English. Each word is spelled in the language of its first letter. Each language's
+/// grammar rules read the whole paragraph (so sentence boundaries are seen) but report only
+/// inside that language's spans: an English quotation in a Polish paragraph gets English
+/// spelling and is never told a Polish rule.
+pub fn check_text(text: &str, spans: &[(Range<usize>, ProofLang)]) -> Vec<Issue> {
+    check_text_with(text, spans, &Options::default(), true)
+}
+
+/// [`check_text`] with the File › Options › Proofing choices: what spelling skips, and whether
+/// grammar is checked at all.
+pub fn check_text_with(text: &str, spans: &[(Range<usize>, ProofLang)], opts: &Options, grammar: bool) -> Vec<Issue> {
+    // Sorted, empty ones dropped, neighbours of one language merged.
+    let mut sorted: Vec<&(Range<usize>, ProofLang)> = spans.iter().filter(|(r, _)| r.start < r.end).collect();
+    sorted.sort_by_key(|s| s.0.start);
+    let mut merged: Vec<(Range<usize>, ProofLang)> = Vec::new();
+    for (r, l) in sorted {
+        match merged.last_mut() {
+            Some((m, ml)) if *ml == *l && m.end == r.start => m.end = r.end,
+            _ => merged.push((r.clone(), *l)),
         }
     }
+    let lang_at = |i: usize| -> ProofLang {
+        let k = merged.partition_point(|(r, _)| r.end <= i);
+        merged.get(k).filter(|(r, _)| r.start <= i).map_or(ProofLang::En, |s| s.1)
+    };
+    let mut v: Vec<Issue> = words(text).into_iter().filter_map(|(a, b)| spelling_issue(text, a, b, lang_at(a), opts)).collect();
+    if !grammar {
+        v.sort_by_key(|i| (i.start, i.end));
+        return v;
+    }
+    let mut langs: Vec<ProofLang> = merged.iter().map(|s| s.1).collect();
+    let mut covered = 0;
+    for (r, _) in &merged {
+        if r.start > covered {
+            break;
+        }
+        covered = covered.max(r.end);
+    }
+    if covered < text.len() || merged.is_empty() {
+        langs.push(ProofLang::En);
+    }
+    langs.sort();
+    langs.dedup();
+    for lang in langs {
+        v.extend(check_grammar_in(text, lang).into_iter().filter(|i| lang_at(i.start) == lang));
+    }
+    v.sort_by_key(|i| (i.start, i.end));
     v
 }
 
-/// Grammar issues in a paragraph of text.
+/// Grammar issues in a paragraph of English text.
 pub fn check_grammar(text: &str) -> Vec<Issue> {
     let mut v = Vec::new();
     let ws = words(text);
@@ -341,6 +468,7 @@ pub fn check_grammar(text: &str) -> Vec<Issue> {
                 kind: IssueKind::Grammar,
                 message: format!("Repeated word: \"{w1}\""),
                 suggestions: vec![w0.to_string()],
+                lang: ProofLang::En,
             });
         }
         if gap == " " && (w0 == "a" || w0 == "A") && w1.chars().next().is_some_and(|c| "aeiouAEIOU".contains(c)) && !starts_consonant_sound(w1) {
@@ -350,6 +478,7 @@ pub fn check_grammar(text: &str) -> Vec<Issue> {
                 kind: IssueKind::Grammar,
                 message: "Use \"an\" before a vowel sound".into(),
                 suggestions: vec![if w0 == "A" { "An" } else { "an" }.into()],
+                lang: ProofLang::En,
             });
         }
         if gap == " "
@@ -363,6 +492,7 @@ pub fn check_grammar(text: &str) -> Vec<Issue> {
                 kind: IssueKind::Grammar,
                 message: "Use \"a\" before a consonant sound".into(),
                 suggestions: vec![if w0 == "An" { "A" } else { "a" }.into()],
+                lang: ProofLang::En,
             });
         }
     }
@@ -377,13 +507,21 @@ pub fn check_grammar(text: &str) -> Vec<Issue> {
             kind: IssueKind::Grammar,
             message: "Remove the space before the punctuation".into(),
             suggestions: vec![text.get(i + 1..i + 2).unwrap_or("").to_string()],
+            lang: ProofLang::En,
         });
     }
     for (i, _) in text.match_indices("  ") {
         if i > 0 && text.get(..i).is_some_and(|t| t.ends_with(' ')) {
             continue;
         }
-        v.push(Issue { start: i, end: i + 2, kind: IssueKind::Grammar, message: "Extra space".into(), suggestions: vec![" ".into()] });
+        v.push(Issue {
+            start: i,
+            end: i + 2,
+            kind: IssueKind::Grammar,
+            message: "Extra space".into(),
+            suggestions: vec![" ".into()],
+            lang: ProofLang::En,
+        });
     }
     // Sentence start capital.
     let mut after_end = true;
@@ -397,6 +535,7 @@ pub fn check_grammar(text: &str) -> Vec<Issue> {
                 kind: IssueKind::Grammar,
                 message: "Capitalize the first word of a sentence".into(),
                 suggestions: vec![fixed],
+                lang: ProofLang::En,
             });
         }
         let tail = text.get(*b..).unwrap_or("");
@@ -541,6 +680,51 @@ mod tests {
         assert!(hyphen::hyphenate_word("hyphenation", &l).matches('-').count() >= 2);
     }
 
+    fn flagged(t: &str, v: &[Issue]) -> Vec<String> {
+        v.iter().filter(|i| i.kind == IssueKind::Spelling).map(|i| t[i.start..i.end].to_string()).collect()
+    }
+
+    #[test]
+    fn each_language_uses_its_own_tools() {
+        pl::test_dict::install();
+        let pl = "Zażółć gęślą jaźń, chrząszcz brzmi w trzcinie.";
+        assert!(check_spelling_in(pl, ProofLang::Pl).is_empty(), "{:?}", check_spelling_in(pl, ProofLang::Pl));
+        assert!(check_spelling_in(pl, ProofLang::En).len() >= 3, "Polish words are English misspellings");
+        assert!(check_spelling_in("Nous écrivons en français.", ProofLang::Other).is_empty());
+        assert!(check_grammar_in("this is is wrong", ProofLang::Other).is_empty());
+        assert!(is_correct_in("anything", ProofLang::Other) && suggest_in("xyzzy", 5, ProofLang::Other).is_empty());
+        let v = check_spelling_in("Płynie żeka.", ProofLang::Pl);
+        assert_eq!(flagged("Płynie żeka.", &v), ["żeka"]);
+        assert_eq!((v[0].lang, v[0].message.as_str()), (ProofLang::Pl, "Możliwy błąd pisowni"));
+        assert!(suggest_in("żeka", 5, ProofLang::Pl).contains(&"rzeka".to_string()));
+        assert!(suggest_in("recieve", 5, ProofLang::En).contains(&"receive".to_string()));
+        // Polish grammar speaks Polish and has no English a/an rule.
+        let g = check_grammar_in("Wiem że to jest a apple.", ProofLang::Pl);
+        assert!(g.iter().any(|i| i.message == "Brak przecinka przed „że”"), "{g:?}");
+        assert!(!g.iter().any(|i| i.message.contains("\"an\"")), "{g:?}");
+    }
+
+    #[test]
+    fn mixed_language_paragraphs_check_each_run_in_its_language() {
+        pl::test_dict::install();
+        // A Polish paragraph quoting English: English spelling and rules inside the quote only.
+        let t = "Napisał „the quick brown fox is is here” i poszedł spać, bo żeka wylała.";
+        let (a, b) = (t.find("the").unwrap(), t.find('”').unwrap());
+        let spans = [(0..a, ProofLang::Pl), (a..b, ProofLang::En), (b..t.len(), ProofLang::Pl)];
+        let v = check_text(t, &spans);
+        assert_eq!(flagged(t, &v), ["żeka"], "{v:?}");
+        let rep = v.iter().find(|i| i.kind == IssueKind::Grammar).unwrap();
+        assert_eq!((rep.lang, rep.message.as_str()), (ProofLang::En, "Repeated word: \"is\""), "{v:?}");
+        // The English rules don't run over the Polish text (no "Capitalize" for the lower-case
+        // Polish words), and the Polish rules don't run over the English quote.
+        assert!(v.iter().all(|i| i.lang == ProofLang::Pl || (a..b).contains(&i.start)), "{v:?}");
+        // Text outside every span is English; no spans at all is English.
+        assert_eq!(flagged("helo świat", &check_text("helo świat", &[])), ["helo", "świat"]);
+        assert_eq!(flagged("helo świat", &check_text("helo świat", &[(5..12, ProofLang::Pl)])), ["helo"]);
+        // A language without tools: nothing flagged there.
+        assert!(check_text("Bonjour mes amis", &[(0..16, ProofLang::Other)]).is_empty());
+    }
+
     proptest::proptest! {
         #[test]
         fn never_panics(s in "\\PC{0,80}") {
@@ -548,6 +732,28 @@ mod tests {
             let _ = check_grammar(&s);
             let _ = suggest(&s, 3);
             let _ = hyphen::hyphen_points(&s, &hyphen::Limits::default());
+            for lang in [ProofLang::En, ProofLang::Pl, ProofLang::Other] {
+                let _ = check_spelling_in(&s, lang);
+                let _ = check_grammar_in(&s, lang);
+                let _ = is_correct_in(&s, lang);
+                let _ = hyphen::hyphen_points_in(&s, &hyphen::Limits::default(), lang);
+            }
+            let _ = lang::normalize_tag(&s);
+            let _ = ProofLang::from_tag(Some(&s));
+        }
+
+        #[test]
+        fn polish_suggestions_never_panic(s in "[a-ząćęłńóśźżA-ZĄĆĘŁŃÓŚŹŻ'’ -]{0,14}") {
+            let _ = suggest_in(&s, 4, ProofLang::Pl);
+        }
+
+        #[test]
+        fn mixed_spans_never_panic(s in "\\PC{0,60}", cuts in proptest::collection::vec((0usize..80, 0usize..80, 0u8..3), 0..6)) {
+            let langs = [ProofLang::En, ProofLang::Pl, ProofLang::Other];
+            let spans: Vec<(Range<usize>, ProofLang)> = cuts.iter().map(|&(a, b, l)| (a.min(b)..a.max(b), langs[l as usize % 3])).collect();
+            for i in check_text(&s, &spans) {
+                proptest::prop_assert!(i.start <= i.end && i.end <= s.len());
+            }
         }
     }
 }
