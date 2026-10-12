@@ -29,6 +29,8 @@ static EN_US_DIC: &[u8] = include_bytes!("../../../assets/hyphenation/en-us.dic"
 static EN_US_PAT: &str = include_str!("../../../assets/hyphenation/en-us.pat");
 /// hyph-utf8's `hyph-pl.tex`, unmodified (its licence header is in the file).
 static PL_PAT: &str = include_str!("../../../assets/hyphenation/pl.pat");
+/// hyph-utf8's `hyph-pt.tex`, unmodified (its BSD 3-clause header is in the file).
+static PT_PAT: &str = include_str!("../../../assets/hyphenation/pt.pat");
 
 impl Dictionary {
     /// The bundled US English dictionary (decoded on first use).
@@ -57,6 +59,12 @@ impl Patterns {
     pub fn pl() -> &'static Patterns {
         static P: OnceLock<Patterns> = OnceLock::new();
         P.get_or_init(|| Patterns::parse(PL_PAT))
+    }
+
+    /// The bundled Portuguese patterns and exception words (parsed on first use).
+    pub fn pt() -> &'static Patterns {
+        static P: OnceLock<Patterns> = OnceLock::new();
+        P.get_or_init(|| Patterns::parse(PT_PAT))
     }
 }
 
@@ -101,6 +109,9 @@ fn core_breaks(core: &[char], lang: ProofLang) -> (Vec<usize>, Source) {
     if lang == ProofLang::Pl {
         return core_breaks_pl(core);
     }
+    if lang == ProofLang::Pt {
+        return core_breaks_pt(core);
+    }
     let dict = Dictionary::en_us();
     let s: String = core.iter().collect();
     let from_mask = |m: u64, len: usize| (1..len.min(64)).filter(|&i| m & (1 << i) != 0).collect::<Vec<_>>();
@@ -138,6 +149,21 @@ fn core_breaks_pl(core: &[char]) -> (Vec<usize>, Source) {
         return (p, Source::Patterns);
     }
     (heuristic_points_pl(core), Source::Heuristic)
+}
+
+/// [`core_breaks_pl`] for Portuguese: the bundled patterns, then the generic heuristic.
+fn core_breaks_pt(core: &[char]) -> (Vec<usize>, Source) {
+    let pats = Patterns::pt();
+    let s: String = core.iter().collect();
+    if let Some(p) = pats.exception(&s) {
+        return (p.to_vec(), Source::Dictionary);
+    }
+    if !pats.is_empty()
+        && let Some(p) = pats.points(core)
+    {
+        return (p, Source::Patterns);
+    }
+    (heuristic_points(core), Source::Heuristic)
 }
 
 /// Unrestricted break points of an English `word` ([`word_breaks_in`] with [`ProofLang::En`]).
@@ -665,6 +691,40 @@ mod tests {
         assert!(p.len() > 4000, "{}", p.len());
         assert_eq!(p.exception_count(), 20);
         assert_eq!(p.exception("nigdy"), Some(&[2][..]));
+    }
+
+    fn pt(w: &str) -> String {
+        hyphenate_word_in(w, &Limits::default(), ProofLang::Pt)
+    }
+
+    #[test]
+    fn portuguese_patterns_load() {
+        let p = Patterns::pt();
+        assert!(p.len() > 300, "{}", p.len());
+        // `hard-ware`, `soft-ware` — and the file's last pattern line, a bare `1-`, which the
+        // reader counts as a (never-matching) exception because it contains a hyphen.
+        assert_eq!(p.exception_count(), 3);
+        assert_eq!(p.exception("hardware"), Some(&[4][..]));
+        assert_eq!(p.exception("software"), Some(&[4][..]));
+    }
+
+    #[test]
+    fn portuguese_words_hyphenate_by_portuguese_rules() {
+        for (w, want) in [
+            ("problema", "pro-ble-ma"),
+            ("coração", "co-ra-ção"),
+            ("paralelepípedo", "pa-ra-le-le-pí-pe-do"),
+            ("computador", "com-pu-ta-dor"),
+            ("escrever", "es-cre-ver"),
+            ("saudade", "sau-da-de"),
+            ("extraordinário", "ex-tra-or-di-ná-rio"),
+            ("automático", "au-to-má-ti-co"),
+            // One syllable: no break.
+            ("flor", "flor"),
+            ("bem", "bem"),
+        ] {
+            assert_eq!(pt(w), want, "{w}");
+        }
     }
 
     #[test]
