@@ -23,10 +23,15 @@
 //!   suggestions tuned for Italian (missing accents, `REP` confusions, missing spaces),
 //!   conservative grammar rules with Italian messages, and `hyph-utf8`'s Italian patterns
 //!   (Beccari, MIT option).
+//! - **Russian** ([`ProofLang::Ru`], module [`ru`]): spelling against the Hunspell `ru_RU`
+//!   dictionary installed on the system (not bundled either), with `ё` optional and hyphenated
+//!   words (`кто-то`, `по-русски`, `северо-западный`) understood, suggestions tuned for Russian
+//!   (`е`/`ё`, `жи`/`ши`, `тся`/`ться`, voiced and voiceless pairs, missing spaces), Russian
+//!   grammar rules with Russian messages, and Russian word division.
 //! - **Other languages** ([`ProofLang::Other`]): no spelling or grammar marks, like Word without
 //!   the language's proofing tools.
 //! - **Hyphenation** ([`hyphen`]): dictionary, Liang patterns (English, Polish, Portuguese),
-//!   Bulgarian syllable rules, heuristic.
+//!   Bulgarian syllable rules, Russian word-division rules, heuristic.
 //!
 //! [`check_text`] checks a paragraph whose runs are in different languages.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
@@ -42,6 +47,7 @@ pub mod lang;
 pub mod patterns;
 pub mod pl;
 pub mod pt;
+pub mod ru;
 pub mod tr;
 
 use std::collections::HashSet;
@@ -562,6 +568,7 @@ fn spelling_issue(text: &str, a: usize, b: usize, lang: ProofLang, opts: &Option
         ProofLang::Pt => "Possível erro de ortografia",
         ProofLang::It => "Possibile errore di ortografia",
         ProofLang::Tr => "Olası yazım hatası",
+        ProofLang::Ru => "Возможна орфографическая ошибка",
         _ => "Possible spelling mistake",
     };
     Some(Issue { start: a, end: b, kind: IssueKind::Spelling, message: message.into(), suggestions: Vec::new(), lang })
@@ -581,6 +588,7 @@ pub fn is_correct_in_with(word: &str, lang: ProofLang, opts: &Options) -> bool {
         ProofLang::Pt => accepted_by_options(word, opts) || pt::is_correct(word),
         ProofLang::It => accepted_by_options(word, opts) || it::is_correct(word),
         ProofLang::Tr => accepted_by_options(word, opts) || tr::is_correct(word),
+        ProofLang::Ru => accepted_by_options(word, opts) || ru::is_correct(word),
         ProofLang::Bg | ProofLang::Other => true,
     }
 }
@@ -594,6 +602,7 @@ pub fn suggest_in(word: &str, max: usize, lang: ProofLang) -> Vec<String> {
         ProofLang::Pt => pt::suggest(word, max),
         ProofLang::It => it::suggest(word, max),
         ProofLang::Tr => tr::suggest(word, max),
+        ProofLang::Ru => ru::suggest(word, max),
         ProofLang::Bg | ProofLang::Other => Vec::new(),
     }
 }
@@ -609,6 +618,7 @@ pub fn check_grammar_in(text: &str, lang: ProofLang) -> Vec<Issue> {
         ProofLang::Pt => pt::grammar::check(text),
         ProofLang::It => it::grammar::check(text),
         ProofLang::Tr => tr::grammar::check(text),
+        ProofLang::Ru => ru::grammar::check(text),
         ProofLang::Bg | ProofLang::Other => Vec::new(),
     }
 }
@@ -1229,7 +1239,7 @@ mod tests {
             let _ = has_dictionary(Some(&s));
             let _ = is_correct_for(&s, Some(&s));
             let _ = hyphen::hyphen_points(&s, &hyphen::Limits::default());
-            for lang in [ProofLang::En, ProofLang::Pl, ProofLang::Pt, ProofLang::It, ProofLang::Hr, ProofLang::Tr, ProofLang::Other] {
+            for lang in [ProofLang::En, ProofLang::Pl, ProofLang::Pt, ProofLang::It, ProofLang::Hr, ProofLang::Tr, ProofLang::Ru, ProofLang::Other] {
                 let _ = check_spelling_in(&s, lang);
                 let _ = check_grammar_in(&s, lang);
                 let _ = is_correct_in(&s, lang);
@@ -1255,9 +1265,9 @@ mod tests {
         }
 
         #[test]
-        fn mixed_spans_never_panic(s in "\\PC{0,60}", cuts in proptest::collection::vec((0usize..80, 0usize..80, 0u8..5), 0..6)) {
-            let langs = [ProofLang::En, ProofLang::Pl, ProofLang::Pt, ProofLang::Tr, ProofLang::Other];
-            let spans: Vec<(Range<usize>, ProofLang)> = cuts.iter().map(|&(a, b, l)| (a.min(b)..a.max(b), langs[l as usize % 5])).collect();
+        fn mixed_spans_never_panic(s in "\\PC{0,60}", cuts in proptest::collection::vec((0usize..80, 0usize..80, 0u8..6), 0..6)) {
+            let langs = [ProofLang::En, ProofLang::Pl, ProofLang::Pt, ProofLang::Tr, ProofLang::Ru, ProofLang::Other];
+            let spans: Vec<(Range<usize>, ProofLang)> = cuts.iter().map(|&(a, b, l)| (a.min(b)..a.max(b), langs[l as usize % langs.len()])).collect();
             for i in check_text(&s, &spans) {
                 proptest::prop_assert!(i.start <= i.end && i.end <= s.len());
             }
