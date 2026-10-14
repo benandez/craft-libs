@@ -125,7 +125,33 @@ pub fn ignore_word(w: &str) {
     }
 }
 
-/// A number that changes whenever a word is added to or removed from the user dictionary.
+/// Search `dir` for Hunspell dictionaries before the system locations (File › Options ›
+/// Proofing › Dictionaries folder, #1063); `None` clears it. The dictionaries load again from
+/// the new search path, and text is checked again.
+pub fn set_dictionaries_folder(dir: Option<std::path::PathBuf>) {
+    hunspell::set_dictionary_dir(dir);
+    pl::reload_dictionary();
+    pt::reload_dictionary();
+    it::reload_dictionary();
+    hr::reload_dictionary();
+    tr::reload_dictionary();
+    DICTIONARY_GENERATION.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Each language that reads an installed Hunspell dictionary, with the `.dic` file found for it
+/// now (`None`: not installed, so the language has no spelling marks).
+pub fn installed_dictionaries() -> Vec<(ProofLang, Option<std::path::PathBuf>)> {
+    vec![
+        (ProofLang::Pl, pl::installed_path()),
+        (ProofLang::Pt, pt::installed_path()),
+        (ProofLang::It, it::installed_path()),
+        (ProofLang::Hr, hr::installed_path()),
+        (ProofLang::Tr, tr::installed_path()),
+    ]
+}
+
+/// A number that changes whenever a word is added to or removed from the user dictionary, or the
+/// dictionaries folder changes.
 pub fn dictionary_generation() -> u64 {
     DICTIONARY_GENERATION.load(Ordering::Relaxed)
 }
@@ -747,6 +773,41 @@ fn starts_consonant_sound(w: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1063: the dictionaries folder is searched before the system locations; the dictionaries
+    /// in it are reported and used, and cached checks are dropped. The folder holds the same test
+    /// dictionaries the other tests install, so tests running meanwhile see the same words; it
+    /// stays set for the rest of the run for that reason.
+    #[test]
+    fn dictionaries_folder_is_searched_first() {
+        let dir = std::env::temp_dir().join(format!("wc-proof-dictionaries-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, aff, dic) in [
+            ("pl_PL", pl::test_dict::AFF, pl::test_dict::DIC),
+            ("pt_BR", pt::test_dict::AFF, pt::test_dict::DIC),
+            ("it_IT", it::test_dict::AFF, it::test_dict::DIC),
+            ("hr_HR", hr::test_dict::AFF, hr::test_dict::DIC),
+        ] {
+            std::fs::write(dir.join(format!("{name}.aff")), aff).unwrap();
+            std::fs::write(dir.join(format!("{name}.dic")), dic).unwrap();
+        }
+        let before = dictionary_generation();
+        set_dictionaries_folder(Some(dir.clone()));
+        assert!(dictionary_generation() > before, "cached checks are dropped");
+        // Turkish has no test dictionary to put in the folder; it's listed after the others.
+        let found = installed_dictionaries();
+        assert_eq!(found.last().map(|(lang, _)| *lang), Some(ProofLang::Tr));
+        assert_eq!(
+            found[..4],
+            [
+                (ProofLang::Pl, Some(dir.join("pl_PL.dic"))),
+                (ProofLang::Pt, Some(dir.join("pt_BR.dic"))),
+                (ProofLang::It, Some(dir.join("it_IT.dic"))),
+                (ProofLang::Hr, Some(dir.join("hr_HR.dic"))),
+            ]
+        );
+        assert!(is_correct_in("chrząszcz", ProofLang::Pl) && !is_correct_in("chrzonszcz", ProofLang::Pl));
+    }
 
     #[test]
     fn dictionary_loads() {
