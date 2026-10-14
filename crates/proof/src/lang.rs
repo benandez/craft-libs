@@ -24,6 +24,8 @@ pub enum ProofLang {
     /// Italian (`it`, `it-IT`, `it-CH`): the installed Hunspell dictionary (`it_IT`, when there
     /// is one), the Italian grammar rules and the Italian hyphenation patterns.
     It,
+    /// Croatian (`hr`, `hr-HR`)
+    Hr,
     /// A language without proofing tools here (`fr-FR`, `ja-JP`, `x-none`…). Like Word without
     /// the language's proofing tools: no spelling or grammar marks, so its words are never
     /// flagged as English misspellings. Hyphenation keeps using the English patterns, as before
@@ -33,7 +35,7 @@ pub enum ProofLang {
 
 impl ProofLang {
     /// Every language with a spelling dictionary, in display order.
-    pub const PROOFED: [ProofLang; 4] = [ProofLang::En, ProofLang::Pl, ProofLang::Pt, ProofLang::It];
+    pub const PROOFED: [ProofLang; 5] = [ProofLang::En, ProofLang::Pl, ProofLang::Pt, ProofLang::It, ProofLang::Hr];
 
     /// The proofing language of a BCP 47 tag (`pl-PL`, `en_GB`, `PL`…). Only the primary subtag
     /// counts. No tag (or an empty one) is English, WordCraft's default editing language.
@@ -50,6 +52,8 @@ impl ProofLang {
             ProofLang::Pt
         } else if primary.eq_ignore_ascii_case("it") || primary.eq_ignore_ascii_case("ita") {
             ProofLang::It
+        } else if primary.eq_ignore_ascii_case("hr") || primary.eq_ignore_ascii_case("hrv") {
+            ProofLang::Hr
         } else {
             ProofLang::Other
         }
@@ -63,6 +67,7 @@ impl ProofLang {
             ProofLang::Bg => "bg",
             ProofLang::Pt => "pt",
             ProofLang::It => "it",
+            ProofLang::Hr => "hr",
             ProofLang::Other => "",
         }
     }

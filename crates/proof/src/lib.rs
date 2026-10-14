@@ -34,6 +34,7 @@
 pub mod affix;
 pub mod bg;
 pub mod dict;
+pub mod hr;
 pub mod hunspell;
 pub mod hyphen;
 pub mod it;
@@ -504,6 +505,7 @@ fn spelling_issue(text: &str, a: usize, b: usize, lang: ProofLang, opts: &Option
     }
     let message = match lang {
         ProofLang::Pl => "Możliwy błąd pisowni",
+        ProofLang::Hr => "Moguća pravopisna pogreška",
         ProofLang::Pt => "Possível erro de ortografia",
         ProofLang::It => "Possibile errore di ortografia",
         _ => "Possible spelling mistake",
@@ -521,6 +523,7 @@ pub fn is_correct_in_with(word: &str, lang: ProofLang, opts: &Options) -> bool {
     match lang {
         ProofLang::En => is_correct_with(word, opts),
         ProofLang::Pl => accepted_by_options(word, opts) || pl::is_correct(word),
+        ProofLang::Hr => accepted_by_options(word, opts) || hr::is_correct(word),
         ProofLang::Pt => accepted_by_options(word, opts) || pt::is_correct(word),
         ProofLang::It => accepted_by_options(word, opts) || it::is_correct(word),
         ProofLang::Bg | ProofLang::Other => true,
@@ -532,6 +535,7 @@ pub fn suggest_in(word: &str, max: usize, lang: ProofLang) -> Vec<String> {
     match lang {
         ProofLang::En => suggest(word, max),
         ProofLang::Pl => pl::suggest(word, max),
+        ProofLang::Hr => hr::suggest(word, max),
         ProofLang::Pt => pt::suggest(word, max),
         ProofLang::It => it::suggest(word, max),
         ProofLang::Bg | ProofLang::Other => Vec::new(),
@@ -545,6 +549,7 @@ pub fn check_grammar_in(text: &str, lang: ProofLang) -> Vec<Issue> {
     match lang {
         ProofLang::En => check_grammar(text),
         ProofLang::Pl => pl::grammar::check(text),
+        ProofLang::Hr => hr::grammar::check(text),
         ProofLang::Pt => pt::grammar::check(text),
         ProofLang::It => it::grammar::check(text),
         ProofLang::Bg | ProofLang::Other => Vec::new(),
