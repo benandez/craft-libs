@@ -859,6 +859,14 @@ mod tests {
     }
 
     #[test]
+    fn german_patterns_load() {
+        let p = Patterns::de();
+        assert!(p.len() >= 36_709, "{}", p.len());
+        // The file has no exception words, and its `\message{…}` line adds none.
+        assert_eq!(p.exception_count(), 0);
+    }
+
+    #[test]
     fn german_words_follow_the_german_patterns() {
         let de = |w: &str| hyphenate_word_in(w, &Limits::default(), ProofLang::De);
         assert_eq!(de("Silbentrennung"), "Sil-ben-tren-nung");
