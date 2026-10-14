@@ -66,6 +66,16 @@ pub fn search_dirs(lo_exts: Option<&[String]>) -> Vec<PathBuf> {
                 dirs.extend(lo_dirs(&base.join("LibreOffice").join("share").join("extensions").to_string_lossy()));
             }
         }
+        // If LibreOffice is installed on another drive (e.g. D:\Program Files\LibreOffice), check drives C..Z
+        for drive in b'C'..=b'Z' {
+            let drive_char = drive as char;
+            for pf in ["Program Files", "Program Files (x86)"] {
+                let lo_base = PathBuf::from(format!(r"{drive_char}:\{pf}\LibreOffice\share\extensions"));
+                if lo_base.is_dir() {
+                    dirs.extend(lo_dirs(&lo_base.to_string_lossy()));
+                }
+            }
+        }
     } else if cfg!(target_os = "macos") {
         if let Some(h) = &home {
             dirs.push(h.join("Library/Spelling"));

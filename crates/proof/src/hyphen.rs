@@ -127,6 +127,9 @@ fn core_breaks(core: &[char], lang: ProofLang) -> (Vec<usize>, Source) {
     if lang == ProofLang::Bg && core.iter().all(|&c| crate::bg::is_letter(c)) {
         return (crate::bg::points(core), Source::Rules);
     }
+    if lang == ProofLang::Tr && core.iter().all(|&c| crate::tr::hyphen::is_letter(c)) {
+        return (crate::tr::hyphen::points(core), Source::Rules);
+    }
     if lang == ProofLang::Pt {
         return core_breaks_pt(core);
     }
