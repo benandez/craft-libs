@@ -359,6 +359,28 @@ pub fn has_dictionary(lang: Option<&str>) -> bool {
     ProofLang::from_tag(lang).is_proofed()
 }
 
+/// The Hunspell dictionary name (`pl_PL`, `pt_BR`) a proofing language needs but doesn't have
+/// installed, for a status-bar hint (#1167). `None` when the language's dictionary is available,
+/// or when it needs none (English has a built-in word list; unproofed languages aren't offered
+/// one). Reads the dictionary once (it is cached afterwards).
+pub fn missing_dictionary(lang: Option<&str>) -> Option<&'static str> {
+    match ProofLang::from_tag(lang) {
+        ProofLang::Pl => dictionary_needed(ProofLang::Pl, pl::has_dictionary()),
+        ProofLang::Pt => dictionary_needed(ProofLang::Pt, pt::has_dictionary()),
+        _ => None,
+    }
+}
+
+/// The Hunspell name `lang` needs when `installed` is false; only Polish and Portuguese use one.
+fn dictionary_needed(lang: ProofLang, installed: bool) -> Option<&'static str> {
+    match lang {
+        _ if installed => None,
+        ProofLang::Pl => Some("pl_PL"),
+        ProofLang::Pt => Some("pt_BR"),
+        _ => None,
+    }
+}
+
 /// Is `word` spelled correctly in the run's proofing language? A language without a dictionary
 /// can't be checked, so every word counts as correct (no red underlines for it).
 pub fn is_correct_for(word: &str, lang: Option<&str>) -> bool {
@@ -782,6 +804,23 @@ fn starts_consonant_sound(w: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn missing_dictionary_is_named_only_for_hunspell_languages_without_one() {
+        assert_eq!(dictionary_needed(ProofLang::Pl, false), Some("pl_PL"));
+        assert_eq!(dictionary_needed(ProofLang::Pt, false), Some("pt_BR"));
+        assert_eq!(dictionary_needed(ProofLang::Pl, true), None);
+        assert_eq!(dictionary_needed(ProofLang::Pt, true), None);
+        for l in [ProofLang::En, ProofLang::Bg, ProofLang::Other] {
+            assert_eq!(dictionary_needed(l, false), None);
+        }
+        // Installed dictionaries and the built-in English list: no hint.
+        pl::test_dict::install();
+        pt::test_dict::install();
+        for tag in [Some("pl-PL"), Some("pt-BR"), Some("en-US"), Some("fr-FR"), None] {
+            assert_eq!(missing_dictionary(tag), None, "{tag:?}");
+        }
+    }
+
     use super::*;
 
     /// #1063: the dictionaries folder is searched before the system locations; the dictionaries
