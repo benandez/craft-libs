@@ -812,6 +812,43 @@ mod tests {
     }
 
     /// The supplement stays a sorted list of lowercase base forms.
+    /// #40: British spellings and their inflections are not flagged.
+    #[test]
+    fn british_spellings_are_known() {
+        for w in [
+            "judgement",
+            "defence",
+            "licence",
+            "programme",
+            "catalogue",
+            "behaviour",
+            "colour",
+            "colourful",
+            "colourless",
+            "honour",
+            "honoured",
+            "honouring",
+            "honours",
+            "honourable",
+            "rigour",
+            "glamour",
+            "clamour",
+            "endeavour",
+            "paediatric",
+            "prioritise",
+            "prioritised",
+            "prioritising",
+            "privatise",
+            "privatised",
+            "synthesise",
+            "travelogue",
+            "manoeuvrable",
+        ] {
+            assert!(is_correct(w), "{w}");
+        }
+        assert!(check_spelling("The programme honoured her rigour and prioritised colourful, paediatric care.").is_empty());
+    }
+
     #[test]
     fn supplement_is_sorted_lowercase() {
         let words: Vec<&str> = EXTRA_EN.lines().filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
