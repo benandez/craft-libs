@@ -861,7 +861,7 @@ mod tests {
     #[test]
     fn german_patterns_load() {
         let p = Patterns::de();
-        assert!(p.len() >= 36_709, "{}", p.len());
+        assert_eq!(p.len(), 36_709);
         // The file has no exception words, and its `\message{…}` line adds none.
         assert_eq!(p.exception_count(), 0);
     }

@@ -142,6 +142,7 @@ impl Patterns {
                     block = match name {
                         "hyphenation" => Block::Exceptions,
                         "patterns" => Block::Patterns,
+                        // shortcut: the argument ends at the first `}`, so nested braces would leak; no bundled file has them.
                         _ if cmd.contains('{') => Block::Skip,
                         _ => Block::Patterns,
                     };
@@ -343,6 +344,12 @@ mod tests {
         let w: Vec<char> = "abcdefghijklmn".chars().collect();
         assert_eq!(p.values(&w).unwrap()[13], 5);
         assert!(p.to_tex().contains(&".ab4cdefghijklm5n".to_string()));
+    }
+
+    #[test]
+    fn other_commands_arguments_are_skipped() {
+        let p = Patterns::parse("\\message{Some Patterns `x-y' 2024-02-28}\n\\patterns{%\na1b\n}\n\\endinput\n");
+        assert_eq!((p.len(), p.exception_count()), (1, 0));
     }
 
     #[test]
