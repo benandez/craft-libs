@@ -1299,13 +1299,18 @@ mod tests {
         }
 
         #[test]
+        fn italian_suggestions_never_panic(s in "[a-zàèéìòóùA-ZÀÈÉÌÒÓÙ'’ -]{0,14}") {
+            let _ = suggest_in(&s, 4, ProofLang::It);
+        }
+
+        #[test]
         fn turkish_suggestions_never_panic(s in "[a-zçğıöşüA-ZÇĞİÖŞÜ'’ -]{0,14}") {
             let _ = suggest_in(&s, 4, ProofLang::Tr);
         }
 
         #[test]
-        fn mixed_spans_never_panic(s in "\\PC{0,60}", cuts in proptest::collection::vec((0usize..80, 0usize..80, 0u8..6), 0..6)) {
-            let langs = [ProofLang::En, ProofLang::Pl, ProofLang::Pt, ProofLang::Tr, ProofLang::Ru, ProofLang::Other];
+        fn mixed_spans_never_panic(s in "\\PC{0,60}", cuts in proptest::collection::vec((0usize..80, 0usize..80, 0u8..7), 0..6)) {
+            let langs = [ProofLang::En, ProofLang::Pl, ProofLang::Pt, ProofLang::It, ProofLang::Tr, ProofLang::Ru, ProofLang::Other];
             let spans: Vec<(Range<usize>, ProofLang)> = cuts.iter().map(|&(a, b, l)| (a.min(b)..a.max(b), langs[l as usize % langs.len()])).collect();
             for i in check_text(&s, &spans) {
                 proptest::prop_assert!(i.start <= i.end && i.end <= s.len());
