@@ -128,6 +128,11 @@ pub fn load(aff: &Path, dic: &Path) -> Result<AffixDict, String> {
     AffixDict::from_hunspell(&aff_text, &dic_text, &[source.as_str()])
 }
 
+/// ISO 8859-1: every byte is the code point of the same value (the original VERO pt_BR uses it).
+fn decode_latin1(bytes: &[u8]) -> String {
+    bytes.iter().map(|&b| char::from(b)).collect()
+}
+
 /// ISO 8859-2 code points 0xA0..=0xFF (0x00..=0x9F map to themselves).
 const ISO_8859_2_HIGH: &str = "\u{a0}Ą˘Ł¤ĽŚ§¨ŠŞŤŹ\u{ad}ŽŻ°ą˛ł´ľśˇ¸šşťź˝žżŔÁÂĂÄĹĆÇČÉĘËĚÍÎĎĐŃŇÓÔŐÖ×ŘŮÚŰÜÝŢßŕáâăäĺćçčéęëěíîďđńňóôőö÷řůúűüýţ˙";
 
@@ -152,8 +157,8 @@ fn decode_high(bytes: &[u8], high: &str) -> String {
 }
 
 /// Decode an `.aff`/`.dic` pair to UTF-8 from the encoding the `.aff`'s `SET` line names
-/// (UTF-8 when there is none; ISO 8859-2 is the other one Polish dictionaries use, KOI8-R and
-/// Windows-1251 the ones older Russian dictionaries use).
+/// (UTF-8 when there is none; ISO 8859-2 is the other one Polish dictionaries use, ISO 8859-1 the
+/// one the original Portuguese VERO uses, KOI8-R and Windows-1251 the ones older Russian dictionaries use).
 pub fn decode(aff: &[u8], dic: &[u8]) -> Result<(String, String), String> {
     let head = String::from_utf8_lossy(aff.get(..aff.len().min(8192)).unwrap_or_default()).to_string();
     let set = head.lines().find_map(|l| l.trim_start_matches('\u{feff}').strip_prefix("SET ")).map(str::trim).unwrap_or("UTF-8").to_ascii_uppercase();
@@ -162,6 +167,7 @@ pub fn decode(aff: &[u8], dic: &[u8]) -> Result<(String, String), String> {
             let text = |b: &[u8], what: &str| String::from_utf8(b.to_vec()).map_err(|e| format!("{what}: not UTF-8: {e}"));
             Ok((text(aff, ".aff")?, text(dic, ".dic")?))
         }
+        "ISO8859-1" | "ISO-8859-1" => Ok((decode_latin1(aff), decode_latin1(dic))),
         "ISO8859-2" | "ISO-8859-2" => Ok((decode_latin2(aff), decode_latin2(dic))),
         "KOI8-R" | "KOI8R" => Ok((decode_high(aff, KOI8_R_HIGH), decode_high(dic, KOI8_R_HIGH))),
         "CP1251" | "WINDOWS-1251" | "MICROSOFT-CP1251" => Ok((decode_high(aff, CP1251_HIGH), decode_high(dic, CP1251_HIGH))),
@@ -183,6 +189,15 @@ mod tests {
         assert_eq!(d, "żółw");
         assert!(decode(b"SET SHIFT_JIS\n", b"").is_err());
         assert!(decode(b"SET UTF-8\n", b"\xff\xfe").is_err());
+    }
+
+    #[test]
+    fn decodes_latin1() {
+        // `orçamento esperávamos` in ISO 8859-1: ç = 0xE7, á = 0xE1.
+        let (a, d) = decode(b"SET ISO8859-1\nTRY \xe7\n", b"1\nor\xe7amento/A\nesper\xe1vamos\n").unwrap();
+        assert!(a.contains("TRY ç"), "{a}");
+        assert_eq!(d, "1\norçamento/A\nesperávamos\n");
+        assert!(decode(b"SET ISO-8859-1\n", b"\xe7").is_ok());
     }
 
     #[test]
