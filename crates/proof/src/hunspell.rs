@@ -20,10 +20,36 @@ const MAX_FILE: u64 = 64 << 20;
 /// An extra directory searched first (a setting), set by the front end.
 static EXTRA_DIR: RwLock<Option<PathBuf>> = RwLock::new(None);
 
+/// Why an installed dictionary failed to load, by `.dic` name (`pt_BR`): the file and the reason.
+/// Without it a file that is there but unreadable looks the same as no file (#2830).
+static LOAD_ERRORS: RwLock<Vec<(String, PathBuf, String)>> = RwLock::new(Vec::new());
+
+/// Remember (or, for `Ok`, forget) why the dictionary `key` found at `dic` failed to load, and
+/// hand the result back unchanged.
+pub fn note_load<T>(key: &str, dic: &Path, result: Result<T, String>) -> Result<T, String> {
+    let mut errors = LOAD_ERRORS.write().unwrap_or_else(|e| e.into_inner());
+    errors.retain(|(k, _, _)| k != key);
+    if let Err(e) = &result {
+        errors.push((key.to_string(), dic.to_path_buf(), e.clone()));
+    }
+    result
+}
+
+/// Forget the load error of the dictionary `key` (none found, or it is about to be searched for again).
+pub fn clear_load_error(key: &str) {
+    LOAD_ERRORS.write().unwrap_or_else(|e| e.into_inner()).retain(|(k, _, _)| k != key);
+}
+
+/// The `.dic` file and the reason of the last failed load of the dictionary `key`, if any.
+pub fn load_error(key: &str) -> Option<(PathBuf, String)> {
+    LOAD_ERRORS.read().unwrap_or_else(|e| e.into_inner()).iter().find(|(k, _, _)| k == key).map(|(_, p, e)| (p.clone(), e.clone()))
+}
+
 /// Search `dir` before the system locations (a "dictionaries folder" setting); `None` clears it.
 /// Takes effect for dictionaries not loaded yet.
 pub fn set_dictionary_dir(dir: Option<PathBuf>) {
     *EXTRA_DIR.write().unwrap_or_else(|e| e.into_inner()) = dir;
+    LOAD_ERRORS.write().unwrap_or_else(|e| e.into_inner()).clear(); // they belong to the old search path
 }
 
 /// The LibreOffice extension directories a Hunspell dictionary name may live in: LibreOffice's
@@ -189,6 +215,24 @@ mod tests {
         assert_eq!(d, "żółw");
         assert!(decode(b"SET SHIFT_JIS\n", b"").is_err());
         assert!(decode(b"SET UTF-8\n", b"\xff\xfe").is_err());
+    }
+
+    /// #2830: a dictionary that is there but can't be read leaves its reason behind; a good
+    /// load or no file clears it.
+    #[test]
+    fn load_error_is_remembered_until_the_next_good_load() {
+        let key = "test_unreadable_2830";
+        assert_eq!(load_error(key), None);
+        let dic = Path::new("/dicts/test.dic");
+        assert!(note_load(key, dic, decode(b"SET SHIFT_JIS\n", b"")).is_err());
+        let (file, reason) = load_error(key).expect("error kept");
+        assert_eq!(file, dic);
+        assert_eq!(reason, "unsupported encoding SHIFT_JIS");
+        assert!(note_load(key, dic, decode(b"SET UTF-8\n", b"")).is_ok());
+        assert_eq!(load_error(key), None);
+        let _ = note_load::<()>(key, dic, Err("too large".into()));
+        clear_load_error(key);
+        assert_eq!(load_error(key), None);
     }
 
     #[test]

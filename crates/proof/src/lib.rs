@@ -167,6 +167,22 @@ pub fn installed_dictionaries() -> Vec<(ProofLang, Option<std::path::PathBuf>)> 
     ]
 }
 
+/// Why the dictionary found for `lang` failed to load (unsupported encoding, too large, a parse
+/// error), if it was read and failed. Doesn't read anything itself: a dictionary nobody has
+/// checked yet reports `None` (#2830).
+pub fn dictionary_load_error(lang: ProofLang) -> Option<String> {
+    let key = match lang {
+        ProofLang::Pl => "pl_PL",
+        ProofLang::Pt => "pt_BR",
+        ProofLang::It => "it_IT",
+        ProofLang::Hr => "hr_HR",
+        ProofLang::Tr => "tr_TR",
+        ProofLang::Id => "id_ID",
+        _ => return None,
+    };
+    hunspell::load_error(key).map(|(_, reason)| reason)
+}
+
 /// A number that changes whenever a word is added to or removed from the user dictionary, or the
 /// dictionaries folder changes.
 pub fn dictionary_generation() -> u64 {
@@ -382,6 +398,23 @@ pub fn missing_dictionary(lang: Option<&str>) -> Option<&'static str> {
         ProofLang::Pt => dictionary_needed(ProofLang::Pt, pt::has_dictionary()),
         _ => None,
     }
+}
+
+/// The Hunspell name, `.dic` file and reason of a dictionary that is installed for this language
+/// but couldn't be read (unsupported `SET` encoding, too large, a parse error). `None` when it
+/// loaded, or when no file exists (then [`missing_dictionary`] names it). Reads the dictionary
+/// once (it is cached afterwards).
+pub fn unreadable_dictionary(lang: Option<&str>) -> Option<(&'static str, std::path::PathBuf, String)> {
+    let (proof_lang, loaded) = match ProofLang::from_tag(lang) {
+        ProofLang::Pl => (ProofLang::Pl, pl::has_dictionary()),
+        ProofLang::Pt => (ProofLang::Pt, pt::has_dictionary()),
+        _ => return None,
+    };
+    let name = dictionary_needed(proof_lang, false)?;
+    if loaded {
+        return None;
+    }
+    hunspell::load_error(name).map(|(file, reason)| (name, file, reason))
 }
 
 /// The Hunspell name `lang` needs when `installed` is false; only Polish and Portuguese use one.
