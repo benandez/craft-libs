@@ -16,6 +16,11 @@ pub use suggest::suggest;
 /// The Czech dictionary: `None` until first use, then the installed one (or an empty one).
 static DICT: RwLock<Option<Arc<AffixDict>>> = RwLock::new(None);
 
+/// Whether `DICT` holds a dictionary given with [`install_dictionary`] rather than one found on
+/// disk: it has no file of its own to report from [`installed_path`], even if a matching file
+/// happens to exist too.
+static DICT_IN_MEMORY: RwLock<bool> = RwLock::new(false);
+
 /// File names of a Czech Hunspell dictionary.
 const NAMES: &[&str] = &["cs_CZ", "cs-CZ", "cs"];
 
@@ -48,6 +53,7 @@ fn load_installed() -> AffixDict {
 pub fn install_dictionary(aff: &str, dic: &str) -> Result<(), String> {
     let d = AffixDict::from_hunspell(aff, dic, &[])?;
     *DICT.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(d));
+    *DICT_IN_MEMORY.write().unwrap_or_else(|e| e.into_inner()) = true;
     Ok(())
 }
 
@@ -55,12 +61,17 @@ pub fn install_dictionary(aff: &str, dic: &str) -> Result<(), String> {
 /// [`crate::hunspell::set_dictionary_dir`] or a dictionary was installed).
 pub fn reload_dictionary() {
     *DICT.write().unwrap_or_else(|e| e.into_inner()) = None;
+    *DICT_IN_MEMORY.write().unwrap_or_else(|e| e.into_inner()) = false;
 }
 
 /// The `.dic` file of the installed Czech dictionary, searching the dictionaries folder and
 /// the system locations now (File › Options › Proofing shows it, #3226); `None` when there is
-/// none. A dictionary given with [`install_dictionary`] has no file and isn't reported.
+/// none. A dictionary given with [`install_dictionary`] has no file and isn't reported, even if a
+/// matching file also happens to exist.
 pub fn installed_path() -> Option<std::path::PathBuf> {
+    if *DICT_IN_MEMORY.read().unwrap_or_else(|e| e.into_inner()) {
+        return None;
+    }
     crate::hunspell::find(NAMES).map(|(_, dic)| dic)
 }
 

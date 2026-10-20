@@ -955,12 +955,12 @@ mod tests {
         );
         // #3226: Russian and Czech were missing from installed_dictionaries() entirely (no
         // installed_path() in either module), so neither ever showed up in File › Options ›
-        // Proofing, installed or not.
-        assert_eq!(
-            found[5..7],
-            [(ProofLang::Ru, Some(dir.join("ru_RU.dic"))), (ProofLang::Cs, Some(dir.join("cs_CZ.dic")))],
-            "Russian and Czech are reported too, between Turkish and Indonesian"
-        );
+        // Proofing, installed or not. Their languages, not their exact path, is what belongs
+        // here: unlike the four above, installed_path() for Russian and Czech also reflects
+        // whether install_dictionary() gave one directly (#3252 review), which ru's and cs's own
+        // test modules do, concurrently, in tests of their own — asserting an exact path here
+        // would race them for no reason this test needs to care about.
+        assert_eq!(found[5..7].iter().map(|(lang, _)| *lang).collect::<Vec<_>>(), [ProofLang::Ru, ProofLang::Cs], "{found:?}");
         assert!(is_correct_in("chrząszcz", ProofLang::Pl) && !is_correct_in("chrzonszcz", ProofLang::Pl));
         assert!(is_correct_in("дом", ProofLang::Ru) && !is_correct_in("дум", ProofLang::Ru));
     }
