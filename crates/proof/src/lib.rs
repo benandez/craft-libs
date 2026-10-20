@@ -150,6 +150,8 @@ pub fn set_dictionaries_folder(dir: Option<std::path::PathBuf>) {
     it::reload_dictionary();
     hr::reload_dictionary();
     tr::reload_dictionary();
+    ru::reload_dictionary();
+    cs::reload_dictionary();
     id::reload_dictionary();
     DICTIONARY_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
@@ -930,6 +932,11 @@ mod tests {
             std::fs::write(dir.join(format!("{name}.aff")), aff).unwrap();
             std::fs::write(dir.join(format!("{name}.dic")), dic).unwrap();
         }
+        // #3252 review: force Russian and Czech to cache whatever they find before the folder is
+        // set (empty, with no folder and nothing installed on CI), so the folder change below has
+        // a stale cache to actually invalidate, not just an untouched `None`.
+        ru::dictionary();
+        cs::dictionary();
         let before = dictionary_generation();
         set_dictionaries_folder(Some(dir.clone()));
         assert!(dictionary_generation() > before, "cached checks are dropped");
