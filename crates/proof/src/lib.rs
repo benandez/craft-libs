@@ -163,6 +163,8 @@ pub fn installed_dictionaries() -> Vec<(ProofLang, Option<std::path::PathBuf>)> 
         (ProofLang::It, it::installed_path()),
         (ProofLang::Hr, hr::installed_path()),
         (ProofLang::Tr, tr::installed_path()),
+        (ProofLang::Ru, ru::installed_path()),
+        (ProofLang::Cs, cs::installed_path()),
         (ProofLang::Id, id::installed_path()),
     ]
 }
@@ -921,6 +923,8 @@ mod tests {
             ("pt_BR", pt::test_dict::AFF, pt::test_dict::DIC),
             ("it_IT", it::test_dict::AFF, it::test_dict::DIC),
             ("hr_HR", hr::test_dict::AFF, hr::test_dict::DIC),
+            ("ru_RU", ru::test_dict::AFF, ru::test_dict::DIC),
+            ("cs_CZ", cs::test_dict::AFF, cs::test_dict::DIC),
             ("id_ID", id::test_dict::AFF, id::test_dict::DIC),
         ] {
             std::fs::write(dir.join(format!("{name}.aff")), aff).unwrap();
@@ -942,7 +946,16 @@ mod tests {
                 (ProofLang::Hr, Some(dir.join("hr_HR.dic"))),
             ]
         );
+        // #3226: Russian and Czech were missing from installed_dictionaries() entirely (no
+        // installed_path() in either module), so neither ever showed up in File › Options ›
+        // Proofing, installed or not.
+        assert_eq!(
+            found[5..7],
+            [(ProofLang::Ru, Some(dir.join("ru_RU.dic"))), (ProofLang::Cs, Some(dir.join("cs_CZ.dic")))],
+            "Russian and Czech are reported too, between Turkish and Indonesian"
+        );
         assert!(is_correct_in("chrząszcz", ProofLang::Pl) && !is_correct_in("chrzonszcz", ProofLang::Pl));
+        assert!(is_correct_in("дом", ProofLang::Ru) && !is_correct_in("дум", ProofLang::Ru));
     }
 
     /// #1741: a list item may be a fragment, so its first word needs no capital in any language
