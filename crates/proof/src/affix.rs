@@ -266,7 +266,7 @@ pub struct AffixDict {
     keepcase: Mask,
     /// `ICONV`: input conversions applied before a lookup, `(from, to)`.
     iconv: Vec<(String, String)>,
-    /// `IGNORE`: characters removed from input words (and from the stems and affixes).
+    /// `IGNORE`: characters removed from input words (and from the stems and appended texts).
     ignore: Box<[char]>,
     /// Provenance and licence lines, kept through [`AffixDict::to_bytes`].
     comments: Vec<String>,
@@ -361,6 +361,12 @@ impl Rules {
             .ok_or_else(|| format!("flag alias {written} is not defined"))
     }
 
+    /// The flags of a `.dic` entry. An undefined alias reads as no flags, as in Hunspell: the
+    /// stem is still a word, without affixes.
+    fn dic_flags<'a>(&'a self, written: &'a str) -> &'a str {
+        self.flags(written).unwrap_or("")
+    }
+
     /// `w` without the `IGNORE` characters.
     fn strip_ignored(&self, w: &str) -> String {
         if self.ignore.is_empty() { w.to_string() } else { w.chars().filter(|c| !self.ignore.contains(c)).collect() }
@@ -437,15 +443,17 @@ fn parse_aff(aff: &str) -> Result<Rules, String> {
             // the words it marks are correct.
             "AM" | "LEMMA_PRESENT" => {}
             "SUBSTANDARD" => r.substandard = Some(one_flag(at(1), dir, n)?),
+            // The first `AF` or `ICONV` line is the table's count, as in Hunspell, even with a
+            // trailing comment (`AF 1559 # aliases`).
             "AF" => {
-                if !af_header && f.len() == 2 && at(1).parse::<usize>().is_ok() {
+                if !af_header && at(1).parse::<usize>().is_ok() {
                     af_header = true;
                 } else {
                     r.aliases.push(at(1).to_string());
                 }
             }
             "ICONV" => {
-                if !iconv_header && f.len() == 2 && at(1).parse::<usize>().is_ok() {
+                if !iconv_header && at(1).parse::<usize>().is_ok() {
                     iconv_header = true;
                 } else if f.len() >= 3 {
                     r.iconv.push((at(1).to_string(), at(2).to_string()));
@@ -512,10 +520,11 @@ fn parse_aff(aff: &str) -> Result<Rules, String> {
         }
     }
     // Aliases may be declared after the rules that use them; resolve once all are read.
+    // Hunspell removes `IGNORE` characters from the appended text only: a stripped text that
+    // holds one never matches a stem (stems lose them too), so the rule never applies.
     let resolve = |rules: &mut Vec<RawRule>, r: &Rules| -> Result<(), String> {
         for rule in rules.iter_mut() {
             rule.4 = r.flags(&rule.4)?.to_string();
-            rule.2 = r.strip_ignored(&rule.2);
             rule.3 = r.strip_ignored(&rule.3);
         }
         Ok(())
@@ -538,7 +547,12 @@ impl AffixDict {
         let rules = parse_aff(aff)?;
         let mut stems: Vec<(String, String)> = Vec::new();
         for (n, line) in dic.lines().enumerate() {
-            let Some(tok) = split_fields(line).next() else { continue };
+            // The entry may hold spaces (`ad hoc/B\tpo:adv`); it ends where Hunspell ends it.
+            let line = line.trim_start_matches([' ', '\t']);
+            let tok = line.get(..crate::hunspell::dic_entry_end(line.as_bytes())).unwrap_or_default();
+            if tok.is_empty() {
+                continue;
+            }
             if n == 0 && tok.parse::<usize>().is_ok() {
                 continue;
             }
@@ -565,7 +579,7 @@ impl AffixDict {
             if word.is_empty() || word.len() > MAX_WORD_BYTES || word.contains(['\n', '/']) {
                 continue;
             }
-            let flags = rules.flags(&flags).map_err(|e| format!(".dic line {}: {e}", n + 1))?.to_string();
+            let flags = rules.dic_flags(&flags).to_string();
             stems.push((word, flags));
         }
         AffixDict::build(rules, stems, comments.iter().map(ToString::to_string).collect())
@@ -814,7 +828,8 @@ impl AffixDict {
     /// `w` after the `ICONV` conversions (at each position the longest match wins) and without
     /// the `IGNORE` characters.
     fn normalize<'a>(&self, w: &'a str) -> std::borrow::Cow<'a, str> {
-        if self.iconv.is_empty() && self.ignore.is_empty() {
+        let converts = |rest: &str| self.iconv.iter().any(|(from, _)| !from.is_empty() && rest.contains(from.as_str()));
+        if !w.contains(&*self.ignore) && !converts(w) {
             return std::borrow::Cow::Borrowed(w);
         }
         let mut out = String::with_capacity(w.len());
@@ -1577,7 +1592,10 @@ pub(crate) mod tests {
         let d = AffixDict::from_hunspell(aff, "1\nház/1\t1\n", &[]).unwrap();
         assert!(d.contains("ház") && d.contains("házok") && d.contains("házat") && d.contains("házokban"));
         assert!(!d.contains("házban"), "the stem has a and b, not c");
-        assert!(AffixDict::from_hunspell(aff, "1\nház/3\n", &[]).is_err(), "alias 3 is not defined");
+        // An undefined alias reads as no flags, as in Hunspell: the stem loads, without affixes.
+        let undefined = AffixDict::from_hunspell(aff, "2\nház/3\nkert/1\n", &[]).unwrap();
+        assert!(undefined.check("ház") && !undefined.check("házok"), "alias 3 is not defined");
+        assert!(undefined.check("kertok"), "the other entries keep their aliases");
         let back = AffixDict::from_bytes(&d.to_bytes()).unwrap();
         assert!(back.contains("házokban") && !back.contains("házban"), "aliases are expanded in the compact format");
     }
@@ -1592,6 +1610,53 @@ pub(crate) mod tests {
         assert!(!d.check("ﬁner"));
         let back = AffixDict::from_bytes(&d.to_bytes()).unwrap();
         assert!(back.check("ﬁnes") && back.check("waﬄe") && back.check("waf(fle)"));
+    }
+
+    #[test]
+    fn count_lines_may_carry_a_comment() {
+        // Hunspell reads the first `AF` and `ICONV` line as the count, comment and all: `AF 2 #`
+        // is no alias, and `ICONV 1 # …` doesn't turn `1` into `#`.
+        let aff = "SET UTF-8\nAF 2 # aliases\nAF a # 1\nAF b # 2\nICONV 1 # ligatures\nICONV q y\nSFX a Y 1\nSFX a 0 ok .\nSFX b Y 1\nSFX b 0 at .\n";
+        let d = AffixDict::from_hunspell(aff, "3\nhaz/1\nkert/2\na1\n", &[]).unwrap();
+        assert!(d.check("hazok") && !d.check("hazat") && d.check("kertat") && !d.check("kertok"), "alias 1 is `a`");
+        assert!(d.check("a1") && !d.check("a#"));
+        // The UTF-8 reader keeps such a line as it is, so both readers agree on it.
+        let (a, dic) = crate::hunspell::decode(aff.as_bytes(), "1\nhaz/1\n".as_bytes()).unwrap();
+        assert!(a.contains("AF 2 # aliases") && a.contains("ICONV 1 # ligatures"), "{a}");
+        assert!(AffixDict::from_hunspell(&a, &dic, &[]).unwrap().check("hazok"));
+    }
+
+    #[test]
+    fn dic_entries_may_hold_spaces() {
+        // `ad hoc/B` is one entry, as in Hunspell; `ad` alone is no word.
+        let aff = "SET UTF-8\nSFX B Y 1\nSFX B 0 s .\n";
+        let d = AffixDict::from_hunspell(aff, "3\nad hoc/B\tpo:adv\nword/B po:noun\n  kot/B 12\n", &[]).unwrap();
+        assert!(d.contains("ad hoc") && d.contains("ad hocs"));
+        assert!(!d.contains("ad") && !d.contains("hoc") && !d.contains("ads"));
+        assert!(d.contains("words") && d.contains("kots") && !d.contains("kot/B"));
+    }
+
+    #[test]
+    fn ignored_characters_leave_the_stripped_text_alone() {
+        // Hunspell removes `IGNORE` characters from the appended text, not from the stripped
+        // one: `SFX a bx c` never matches the stem `abx` (stored as `ab`), so `ac` is wrong,
+        // while `SFX a b cx` appends `c` (checked with the Hunspell 1.7 command line).
+        let strip = AffixDict::from_hunspell("SET UTF-8\nIGNORE x\nSFX a Y 1\nSFX a bx c .\n", "1\nabx/a\n", &[]).unwrap();
+        assert!(strip.check("ab") && strip.check("abx") && !strip.check("ac"));
+        let add = AffixDict::from_hunspell("SET UTF-8\nIGNORE x\nSFX a Y 1\nSFX a b cx .\n", "1\nab/a\n", &[]).unwrap();
+        assert!(add.check("ac") && add.check("acx"));
+        for d in [&strip, &add] {
+            let back = AffixDict::from_bytes(&d.to_bytes()).unwrap();
+            assert_eq!(back.check("ac"), d.check("ac"));
+        }
+    }
+
+    #[test]
+    fn normalizing_borrows_when_nothing_changes() {
+        let d = AffixDict::from_hunspell("SET UTF-8\nICONV 1\nICONV ﬁ fi\nIGNORE ()\n", "1\nfine\n", &[]).unwrap();
+        assert!(matches!(d.normalize("fine"), std::borrow::Cow::Borrowed("fine")));
+        assert_eq!(d.normalize("(ﬁ)ne"), "fine");
+        assert!(matches!(dict().normalize("kot"), std::borrow::Cow::Borrowed("kot")));
     }
 
     #[test]
