@@ -224,22 +224,11 @@ fn decode_high(bytes: &[u8], high: &str) -> String {
 /// UTF-8. Those fields are read byte by byte (each byte becomes U+0000..U+00FF, one flag per
 /// byte); the words, affixes and conditions around them are UTF-8.
 pub fn decode(aff: &[u8], dic: &[u8]) -> Result<(String, String), String> {
-    // The whole file is searched: a `FLAG UTF-8` after the rules still decides how the `.dic`
-    // flags are read, as in Hunspell.
-    let directive = |name: &str| {
-        aff.split(|&b| b == b'\n').find_map(|l| {
-            let l = l.strip_prefix("\u{feff}".as_bytes()).unwrap_or(l);
-            // Only the first argument counts, as in Hunspell: `FLAG UTF-8 # Unicode flags` is UTF-8.
-            l.strip_prefix(name.as_bytes())
-                .filter(|rest| rest.first().is_some_and(|b| matches!(b, b' ' | b'\t')))
-                .and_then(|rest| rest.split(|b| matches!(b, b' ' | b'\t' | b'\r')).find(|f| !f.is_empty()))
-                .map(|f| String::from_utf8_lossy(f).to_ascii_uppercase())
-        })
-    };
-    let set = directive("SET").unwrap_or_else(|| "UTF-8".into());
+    let (set, flag) = directives(aff);
+    let set = set.unwrap_or_else(|| "UTF-8".into());
     match set.as_str() {
         "UTF-8" | "UTF8" => {
-            if matches!(directive("FLAG").as_deref(), Some("UTF-8" | "UTF8")) {
+            if matches!(flag.as_deref(), Some("UTF-8" | "UTF8")) {
                 let text = |b: &[u8], what: &str| String::from_utf8(b.to_vec()).map_err(|e| format!("{what}: not UTF-8: {e}"));
                 return Ok((text(aff, ".aff")?, text(dic, ".dic")?));
             }
@@ -252,6 +241,32 @@ pub fn decode(aff: &[u8], dic: &[u8]) -> Result<(String, String), String> {
         "CP1251" | "WINDOWS-1251" | "MICROSOFT-CP1251" => Ok((decode_high(aff, CP1251_HIGH), decode_high(dic, CP1251_HIGH))),
         other => Err(format!("unsupported encoding {other}")),
     }
+}
+
+/// The first arguments of the `.aff`'s first `SET` and `FLAG` lines, in capitals, found in one pass
+/// over the whole file: a `FLAG UTF-8` after the rules still decides how the `.dic` flags are read,
+/// as in Hunspell. Only the first argument counts: `FLAG UTF-8 # Unicode flags` is UTF-8.
+fn directives(aff: &[u8]) -> (Option<String>, Option<String>) {
+    let (mut set, mut flag) = (None, None);
+    for l in aff.split(|&b| b == b'\n') {
+        if set.is_some() && flag.is_some() {
+            break;
+        }
+        let l = l.strip_prefix("\u{feff}".as_bytes()).unwrap_or(l);
+        let slot = match l.first() {
+            Some(b'S') if set.is_none() => (&mut set, &b"SET"[..]),
+            Some(b'F') if flag.is_none() => (&mut flag, &b"FLAG"[..]),
+            _ => continue,
+        };
+        let arg = l
+            .strip_prefix(slot.1)
+            .filter(|rest| rest.first().is_some_and(|b| matches!(b, b' ' | b'\t')))
+            .and_then(|rest| rest.split(|b| matches!(b, b' ' | b'\t' | b'\r')).find(|f| !f.is_empty()));
+        if let Some(a) = arg {
+            *slot.0 = Some(String::from_utf8_lossy(a).to_ascii_uppercase());
+        }
+    }
+    (set, flag)
 }
 
 /// Directives whose one argument is a flag.
@@ -406,7 +421,8 @@ fn comment_field(dir: &str, field: impl Fn(usize) -> Option<String>) -> usize {
 
 /// Where the `word/flags` entry of a `.dic` line ends, as Hunspell reads it: at a tab or at the
 /// first morphological field (a space or tab, two characters and `:`, as in ` po:noun`), whichever
-/// comes first, so an entry may hold spaces (`ad hoc`); with neither, at the first space.
+/// comes first, so an entry may hold spaces (`ad hoc`); with neither, at the end of the line
+/// (`kot/B 12` has the flags `B 12`, as in Hunspell).
 pub(crate) fn dic_entry_end(line: &[u8]) -> usize {
     let blank = |b: &u8| matches!(b, b' ' | b'\t');
     let morph = line.windows(4).position(|w| matches!(w, [a, b, c, b':'] if blank(a) && !blank(b) && !blank(c)));
@@ -415,10 +431,10 @@ pub(crate) fn dic_entry_end(line: &[u8]) -> usize {
         (Some(m), Some(t)) => m.min(t),
         (m, t) => match m.or(t) {
             Some(e) => e,
-            None => line.iter().position(|&b| b == b' ').unwrap_or(line.len()),
+            None => line.len(),
         },
     };
-    // Spaces before the morphological field aren't part of the entry.
+    // Blanks before the morphological field or the line end aren't part of the entry.
     line.get(..end).map_or(end, |e| e.iter().rposition(|b| !blank(b)).map_or(0, |k| k + 1))
 }
 
@@ -495,10 +511,10 @@ mod tests {
     fn utf8_dictionaries_keep_single_byte_flags() {
         // The Hungarian dictionary is `SET UTF-8` but writes flags as single bytes above 0x7F,
         // which aren't UTF-8; each byte is one flag. Its `NAME` line is ISO 8859-2.
-        let aff = b"SET UTF-8\nNAME Magyar helyes\xedr\xe1si\nAF 1\nAF \xd5a # 1\nSFX \xd5 Y 1\nSFX \xd5 0 ok/\xe9 . 7\nSFX \xe9 Y 1\nSFX \xe9 0 ban .\nSFX a Y 1\nSFX a 0 at .\n";
+        let aff = b"SET UTF-8\nNAME Magyar helyes\xedr\xe1si\nAF 2\nAF \xd5a # 1\nAF \xe9 # 2\nSFX \xd5 Y 1\nSFX \xd5 0 ok/2 . 7\nSFX \xe9 Y 1\nSFX \xe9 0 ban .\nSFX a Y 1\nSFX a 0 at .\n";
         let dic = "2\nház/1\t1\nkert/\u{e9}\n".as_bytes();
         let (a, d) = decode(aff, dic).unwrap();
-        assert!(a.contains("AF \u{d5}a # 1") && a.contains("SFX \u{d5} 0 ok/\u{e9} . 7"));
+        assert!(a.contains("AF \u{d5}a # 1") && a.contains("AF \u{e9} # 2") && a.contains("SFX \u{d5} 0 ok/2 . 7"));
         assert!(d.contains("kert/\u{c3}\u{a9}"), "a UTF-8 é in the flags is two one-byte flags");
         let dict = crate::affix::AffixDict::from_hunspell(&a, &d, &[]).unwrap();
         assert!(dict.check("ház") && dict.check("házok") && dict.check("házokban") && dict.check("házat"));
@@ -578,12 +594,17 @@ mod tests {
         assert_eq!(end("word/A po:noun\tts:x"), "word/A", "the morphological field comes before the tab");
         assert_eq!(end("ad hoc/B\tpo:adv"), "ad hoc/B", "a tab ends a phrase");
         assert_eq!(end("ad hoc/B po:adv"), "ad hoc/B");
-        assert_eq!(end("word/A 123"), "word/A", "neither: the first space");
+        assert_eq!(end("word/A 123"), "word/A 123", "neither: the whole line, as in Hunspell");
+        assert_eq!(end("ad hoc/B  "), "ad hoc/B");
         assert_eq!(end("word"), "word");
         assert_eq!(end("a:b/A"), "a:b/A", "a colon inside the word isn't a field");
         // Single-byte flags of a phrase entry are read byte by byte, then the UTF-8 morphology.
         let (_, d) = decode(b"SET UTF-8\n", b"1\nad hoc/\xe9\tpo:adv\n").unwrap();
         assert_eq!(d, "1\nad hoc/\u{e9}\tpo:adv\n");
+        // Without a tab or a morphological field the whole line is the entry: its byte flags
+        // don't fail the load (the Hungarian dictionary has such lines: `tök jó/396`).
+        let (_, d) = decode(b"SET UTF-8\n", b"1\nad hoc/\xe9\n").unwrap();
+        assert_eq!(d, "1\nad hoc/\u{e9}\n");
     }
 
     #[test]
