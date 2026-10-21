@@ -295,7 +295,7 @@ fn parse_aff(aff: &str) -> Result<Rules, String> {
                 }
             }
             directive @ ("FORBIDDENWORD" | "NOSUGGEST") => {
-                let mut it = at(1).chars();
+                let mut it = at(1).chars().filter(|&c| c != EMOJI_SELECTOR);
                 match (it.next(), it.next()) {
                     (Some(c), None) if !c.is_whitespace() => {
                         if directive == "FORBIDDENWORD" {
@@ -1096,6 +1096,15 @@ pub(crate) mod tests {
         assert!(d.contains("telebanco") && d.contains("telebancos"), "the ☎ prefix applies");
         assert!(d.contains("basuras") && !d.contains("telebasura"), "only to stems that carry it");
         assert!(!d.flag_chars.contains(&EMOJI_SELECTOR), "the selector is not a flag");
+    }
+
+    #[test]
+    fn emoji_forbiddenword_and_nosuggest_flags_load() {
+        // The same selector after the flag of the directives that name one flag.
+        let aff = "SET UTF-8\nFLAG UTF-8\nFORBIDDENWORD \u{260e}\u{fe0f}\nNOSUGGEST \u{1f6ab}\u{fe0f}\n";
+        let d = AffixDict::from_hunspell(aff, "3\nbanco\nbanko/\u{260e}\u{fe0f}\nbancu/\u{1f6ab}\u{fe0f}\n", &[]).unwrap();
+        assert!(d.contains("banco") && d.contains("bancu"));
+        assert!(!d.contains("banko"), "a stem with the FORBIDDENWORD flag is not a word");
     }
 
     #[test]
