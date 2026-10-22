@@ -11,8 +11,7 @@
 //! also be stored in WordCraft's compact format ([`AffixDict::to_bytes`]): the rules as text
 //! lines and the stems front-coded, raw-deflated together (the Polish dictionary is under 1 MB).
 //!
-//! Supported: one-character flags (at most 128 distinct, any Unicode character — `FLAG UTF-8`;
-//! a variation selector after one, as in the Spanish dictionaries' `☎️`, belongs to it),
+//! Supported: one-character flags (at most 128 distinct, any Unicode character — `FLAG UTF-8`),
 //! `PFX`/`SFX` with strip, append and condition (`.`, letters, `[abc]`, `[^abc]`), cross
 //! products, continuation classes on suffixes (at most two suffixes in a row, as in Hunspell),
 //! `FORBIDDENWORD`, `NOSUGGEST`, and the suggestion tables `TRY`, `KEY`, `MAP` and `REP`. Rejected: compounding,
@@ -262,22 +261,15 @@ struct Rules {
 /// A rule as parsed from text, before flags become bits: `(flag, cross, strip, add, cont, cond)`.
 type RawRule = (char, bool, String, String, String, String);
 
-/// Is `c` a Unicode variation selector (U+FE00–U+FE0F)? It only picks how the character before
-/// it is drawn, so in a flag field it belongs to that flag: the RLA-ES Spanish dictionaries write
-/// a flag as `☎️` (`☎` and U+FE0F), which Hunspell reads as `☎` (#3360).
-fn is_variation_selector(c: char) -> bool {
-    ('\u{FE00}'..='\u{FE0F}').contains(&c)
-}
-
-/// The flag characters of a flag field, without [variation selectors](is_variation_selector).
-fn flag_chars(field: &str) -> impl Iterator<Item = char> + '_ {
-    field.chars().filter(|&c| !is_variation_selector(c))
-}
-
 /// `0` means empty in Hunspell's strip and append fields.
 fn zero_empty(s: &str) -> String {
     if s == "0" { String::new() } else { s.to_string() }
 }
+
+/// U+FE0F VARIATION SELECTOR-16 asks for the emoji form of the character before it. A dictionary
+/// that uses an emoji as a flag may write it after the flag (RLA-ES Spanish: `PFX ☎️`, `banco/S☎️`),
+/// but it is not a flag of its own: it is dropped wherever flags are read.
+const EMOJI_SELECTOR: char = '\u{fe0f}';
 
 /// Read Hunspell `.aff` text (already decoded to UTF-8).
 fn parse_aff(aff: &str) -> Result<Rules, String> {
@@ -303,7 +295,7 @@ fn parse_aff(aff: &str) -> Result<Rules, String> {
                 }
             }
             directive @ ("FORBIDDENWORD" | "NOSUGGEST") => {
-                let mut it = flag_chars(at(1));
+                let mut it = at(1).chars().filter(|&c| c != EMOJI_SELECTOR);
                 match (it.next(), it.next()) {
                     (Some(c), None) if !c.is_whitespace() => {
                         if directive == "FORBIDDENWORD" {
@@ -333,8 +325,8 @@ fn parse_aff(aff: &str) -> Result<Rules, String> {
             }
             "PFX" | "SFX" => {
                 let suffix = dir == "SFX";
-                let mut flag_field = flag_chars(at(1));
-                let (Some(flag), None) = (flag_field.next(), flag_field.next()) else {
+                let mut flag_chars = at(1).chars().filter(|&c| c != EMOJI_SELECTOR);
+                let (Some(flag), None) = (flag_chars.next(), flag_chars.next()) else {
                     return Err(format!("line {}: flag `{}` is not one character", n + 1, at(1)));
                 };
                 // Only a header ignores trailing fields; a rule condition beginning with # is literal.
@@ -354,7 +346,7 @@ fn parse_aff(aff: &str) -> Result<Rules, String> {
                 let cond = if f.len() >= 5 { at(4) } else { "." };
                 parse_cond(cond).map_err(|e| format!("line {}: {e}", n + 1))?;
                 let c = cross.get(&(suffix, flag)).copied().unwrap_or(false);
-                let rule: RawRule = (flag, c, zero_empty(at(2)), zero_empty(add), flag_chars(cont).collect(), cond.to_string());
+                let rule: RawRule = (flag, c, zero_empty(at(2)), zero_empty(add), cont.to_string(), cond.to_string());
                 if suffix {
                     r.suffixes.push(rule);
                 } else {
@@ -390,7 +382,7 @@ impl AffixDict {
             let mut in_flags = false;
             while let Some(c) = chars.next() {
                 if in_flags {
-                    if !is_variation_selector(c) {
+                    if c != EMOJI_SELECTOR {
                         flags.push(c);
                     }
                 } else if c == '\\' && chars.peek() == Some(&'/') {
@@ -1094,18 +1086,25 @@ pub(crate) mod tests {
         assert!(AffixDict::from_hunspell("FLAG UTF-8\n", "0\n", &[]).is_ok(), "FLAG alone is harmless");
     }
 
-    /// #3360: the RLA-ES Spanish dictionaries write one flag as `☎️` (`☎` and the variation
-    /// selector U+FE0F) in the `.aff` and in the `.dic`; it is the flag `☎`, as Hunspell reads it,
-    /// not a two-character flag that refuses the whole dictionary.
     #[test]
-    fn a_variation_selector_belongs_to_its_flag() {
-        let aff = "SET UTF-8\nFLAG UTF-8\nFORBIDDENWORD ✖\u{FE0F}\nSFX \u{260E}\u{FE0F} Y 1\nSFX \u{260E}\u{FE0F} 0 s/A\u{FE0F} .\nSFX A Y 1\nSFX A 0 x .\n";
-        let d = AffixDict::from_hunspell(aff, "3\ncasa/\u{260E}\u{FE0F}\nmesa/\u{260E}\nzq/✖\u{FE0F}\n", &[]).unwrap();
-        assert!(d.contains("casa") && d.contains("casas") && d.contains("casasx"));
-        assert!(d.contains("mesas"), "the bare flag is the same flag");
-        assert!(!d.contains("zq"), "FORBIDDENWORD with a selector still forbids");
-        assert_eq!(d.flag_chars.len(), 3, "{:?}", d.flag_chars);
-        assert!(AffixDict::from_hunspell("SFX ab Y 1\nSFX ab 0 s .\n", "0\n", &[]).is_err(), "two flag characters are still refused");
+    fn emoji_flags_with_a_variation_selector_load() {
+        // RLA-ES (the Spanish dictionaries in LibreOffice and most Linux distributions) writes its
+        // telephone flag as ☎ followed by U+FE0F, in the rule and on the stems.
+        let aff = "SET UTF-8\nFLAG UTF-8\nPFX \u{260e}\u{fe0f} Y 1\nPFX \u{260e}\u{fe0f} 0 tele .\nSFX S Y 1\nSFX S 0 s [aeiou]\n";
+        let d = AffixDict::from_hunspell(aff, "2\nbanco/S\u{260e}\u{fe0f}\nbasura/S\n", &[]).unwrap();
+        assert!(d.contains("banco") && d.contains("bancos"));
+        assert!(d.contains("telebanco") && d.contains("telebancos"), "the ☎ prefix applies");
+        assert!(d.contains("basuras") && !d.contains("telebasura"), "only to stems that carry it");
+        assert!(!d.flag_chars.contains(&EMOJI_SELECTOR), "the selector is not a flag");
+    }
+
+    #[test]
+    fn emoji_forbiddenword_and_nosuggest_flags_load() {
+        // The same selector after the flag of the directives that name one flag.
+        let aff = "SET UTF-8\nFLAG UTF-8\nFORBIDDENWORD \u{260e}\u{fe0f}\nNOSUGGEST \u{1f6ab}\u{fe0f}\n";
+        let d = AffixDict::from_hunspell(aff, "3\nbanco\nbanko/\u{260e}\u{fe0f}\nbancu/\u{1f6ab}\u{fe0f}\n", &[]).unwrap();
+        assert!(d.contains("banco") && d.contains("bancu"));
+        assert!(!d.contains("banko"), "a stem with the FORBIDDENWORD flag is not a word");
     }
 
     #[test]
