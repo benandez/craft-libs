@@ -33,8 +33,9 @@ const SPAIN: &[&str] = &["es_ES", "es-ES", "es_ANY", "es"];
 /// For Mexico: its own, then a Latin American or generic one.
 const MEXICO: &[&str] = &["es_MX", "es-MX", "es_419", "es-419", "es_ANY", "es"];
 /// For Latin America: its own or a generic one, then the United States' and Mexico's, which
-/// LibreOffice ships (it has no `es_419`) and which use Latin American spelling.
-const LATIN_AMERICA: &[&str] = &["es_419", "es-419", "es_ANY", "es", "es_US", "es_MX"];
+/// LibreOffice ships (it has no `es_419`) and which use Latin American spelling, then
+/// Argentina's, so `es-AR` text is checked when that is the only one installed.
+const LATIN_AMERICA: &[&str] = &["es_419", "es-419", "es_ANY", "es", "es_US", "es_MX", "es_AR", "es-AR"];
 /// For Uruguay: its own, then Argentina's (the same Rioplatense Spanish), then a Latin American
 /// or generic one.
 const URUGUAY: &[&str] = &["es_UY", "es-UY", "es_AR", "es-AR", "es_419", "es-419", "es_ANY", "es"];
@@ -136,18 +137,30 @@ pub fn is_correct(word: &str, lang: ProofLang) -> bool {
     is_correct_with(&dictionary(lang), word, lang)
 }
 
+/// [`is_correct`] with the File › Options › Proofing choices: with Ignore words in UPPERCASE off,
+/// short words in capitals are checked against the dictionary too, and with Ignore words that
+/// contain numbers off, so are words with digits.
+pub fn is_correct_with_options(word: &str, lang: ProofLang, opts: &crate::Options) -> bool {
+    check(&dictionary(lang), word, lang, opts)
+}
+
 /// [`is_correct`] against a given dictionary (an empty one accepts everything).
 pub fn is_correct_with(d: &AffixDict, word: &str, lang: ProofLang) -> bool {
+    check(d, word, lang, &crate::Options::default())
+}
+
+/// [`is_correct_with_options`] against a given dictionary.
+fn check(d: &AffixDict, word: &str, lang: ProofLang, opts: &crate::Options) -> bool {
     if d.is_empty() {
         return true; // no Spanish dictionary installed: no spelling marks
     }
     let w = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '’');
     let w = w.trim_matches(['\'', '’']);
     let n = w.chars().count();
-    if n <= 1 || w.chars().any(|c| c.is_ascii_digit()) || !w.chars().any(char::is_alphabetic) {
+    if n <= 1 || (opts.ignore_numbers && w.chars().any(|c| c.is_ascii_digit())) || !w.chars().any(char::is_alphabetic) {
         return true;
     }
-    if w.chars().all(|c| !c.is_lowercase()) && n <= 6 {
+    if opts.ignore_uppercase && w.chars().all(|c| !c.is_lowercase()) && n <= 6 {
         return true;
     }
     if !w.chars().any(is_latin_letter) {
@@ -187,8 +200,8 @@ mod tests {
             ("es_US", &[la]),
             ("es_UY", &[uy]),
             ("es-UY", &[uy]),
-            ("es_AR", &[uy]),
-            ("es-AR", &[uy]),
+            ("es_AR", &[la, uy]),
+            ("es-AR", &[la, uy]),
             ("es_ANY", &VARIETIES),
             ("es", &VARIETIES),
         ] {
@@ -270,6 +283,25 @@ mod tests {
         for w in ["tenéz", "venì", "decimelo", "decíme", "zqbailá"] {
             assert!(!is_correct(w, ProofLang::EsUy), "{w}");
         }
+    }
+
+    /// With Ignore words in UPPERCASE or Ignore words that contain numbers off, Spanish checks
+    /// those words against the dictionary instead of accepting them (CodeRabbit review on #3562).
+    #[test]
+    fn proofing_options_reach_the_spanish_check() {
+        test_dict::install();
+        let defaults = crate::Options::default();
+        let check_caps = crate::Options { ignore_uppercase: false, ..defaults };
+        let check_digits = crate::Options { ignore_numbers: false, ..defaults };
+        for lang in VARIETIES {
+            assert!(crate::is_correct_in_with("PRUEVA", lang, &defaults), "{lang:?}: short capitals are acronyms by default");
+            assert!(!crate::is_correct_in_with("PRUEVA", lang, &check_caps), "{lang:?}");
+            assert!(crate::is_correct_in_with("PRUEBA", lang, &check_caps), "{lang:?}");
+            assert!(crate::is_correct_in_with("prueva2", lang, &defaults), "{lang:?}");
+            assert!(!crate::is_correct_in_with("prueva2", lang, &check_digits), "{lang:?}");
+            assert!(crate::is_correct_in_with("2026", lang, &check_digits), "{lang:?}: numbers alone stay correct");
+        }
+        assert!(is_correct("PRUEVA", ProofLang::Es), "direct checks keep the defaults");
     }
 
     #[test]

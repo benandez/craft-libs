@@ -49,10 +49,11 @@ pub enum ProofLang {
     /// `id_ID` dictionary, dictionary-driven suggestions and generic checks with Indonesian
     /// messages. Hyphenation keeps the fallback English patterns.
     Id,
-    /// Spanish of Spain (`es`, `es-ES`, and every region not listed for [`ProofLang::EsMx`] or
-    /// [`ProofLang::Es419`]; also ISO 639-2 `spa`): the installed Hunspell `es_ES` dictionary
-    /// (or a generic Spanish one), dictionary-driven suggestions and generic checks with Spanish
-    /// messages ([`crate::es`]). Hyphenation keeps the fallback English patterns.
+    /// Spanish of Spain (`es`, `es-ES`, and every region not listed for [`ProofLang::EsMx`],
+    /// [`ProofLang::Es419`] or [`ProofLang::EsUy`]; also ISO 639-2 `spa`): the installed
+    /// Hunspell `es_ES` dictionary (or a generic Spanish one), dictionary-driven suggestions and
+    /// generic checks with Spanish messages ([`crate::es`]). Hyphenation keeps the fallback
+    /// English patterns.
     Es,
     /// Mexican Spanish (`es-MX`): [`ProofLang::Es`]'s tools with the installed `es_MX`
     /// dictionary, else a Latin American or generic Spanish one.
