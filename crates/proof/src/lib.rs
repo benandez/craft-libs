@@ -151,6 +151,8 @@ pub fn set_dictionaries_folder(dir: Option<std::path::PathBuf>) {
     it::reload_dictionary();
     hr::reload_dictionary();
     tr::reload_dictionary();
+    ru::reload_dictionary();
+    cs::reload_dictionary();
     id::reload_dictionary();
     DICTIONARY_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
@@ -164,6 +166,8 @@ pub fn installed_dictionaries() -> Vec<(ProofLang, Option<std::path::PathBuf>)> 
         (ProofLang::It, it::installed_path()),
         (ProofLang::Hr, hr::installed_path()),
         (ProofLang::Tr, tr::installed_path()),
+        (ProofLang::Ru, ru::installed_path()),
+        (ProofLang::Cs, cs::installed_path()),
         (ProofLang::Id, id::installed_path()),
     ]
 }
@@ -977,11 +981,18 @@ mod tests {
             ("pt_BR", pt::test_dict::AFF, pt::test_dict::DIC),
             ("it_IT", it::test_dict::AFF, it::test_dict::DIC),
             ("hr_HR", hr::test_dict::AFF, hr::test_dict::DIC),
+            ("ru_RU", ru::test_dict::AFF, ru::test_dict::DIC),
+            ("cs_CZ", cs::test_dict::AFF, cs::test_dict::DIC),
             ("id_ID", id::test_dict::AFF, id::test_dict::DIC),
         ] {
             std::fs::write(dir.join(format!("{name}.aff")), aff).unwrap();
             std::fs::write(dir.join(format!("{name}.dic")), dic).unwrap();
         }
+        // #3252 review: force Russian and Czech to cache whatever they find before the folder is
+        // set (empty, with no folder and nothing installed on CI), so the folder change below has
+        // a stale cache to actually invalidate, not just an untouched `None`.
+        ru::dictionary();
+        cs::dictionary();
         let before = dictionary_generation();
         set_dictionaries_folder(Some(dir.clone()));
         assert!(dictionary_generation() > before, "cached checks are dropped");
@@ -998,7 +1009,16 @@ mod tests {
                 (ProofLang::Hr, Some(dir.join("hr_HR.dic"))),
             ]
         );
+        // #3226: Russian and Czech were missing from installed_dictionaries() entirely (no
+        // installed_path() in either module), so neither ever showed up in File › Options ›
+        // Proofing, installed or not. Their languages, not their exact path, is what belongs
+        // here: unlike the four above, installed_path() for Russian and Czech also reflects
+        // whether install_dictionary() gave one directly (#3252 review), which ru's and cs's own
+        // test modules do, concurrently, in tests of their own — asserting an exact path here
+        // would race them for no reason this test needs to care about.
+        assert_eq!(found[5..7].iter().map(|(lang, _)| *lang).collect::<Vec<_>>(), [ProofLang::Ru, ProofLang::Cs], "{found:?}");
         assert!(is_correct_in("chrząszcz", ProofLang::Pl) && !is_correct_in("chrzonszcz", ProofLang::Pl));
+        assert!(is_correct_in("дом", ProofLang::Ru) && !is_correct_in("дум", ProofLang::Ru));
     }
 
     /// #1741: a list item may be a fragment, so its first word needs no capital in any language
