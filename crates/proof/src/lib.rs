@@ -120,16 +120,24 @@ fn user_words() -> &'static RwLock<HashSet<String>> {
 /// Bumped whenever the user dictionary changes, so cached proofing results can be dropped.
 static DICTIONARY_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// The key a word has in the user dictionary and the Ignore All list: lower case and composed
+/// (NFC), as spelling looks words up ([`composed`]). A word added, ignored, removed or loaded
+/// decomposed (`zqprue\u{301}ba`) is then the same entry as its composed form (`zqpruéba`), and
+/// the other way round (#3562 review).
+fn dictionary_key(w: &str) -> String {
+    composed(&w.to_lowercase()).into_owned()
+}
+
 /// Add a word to the user dictionary ("Add to Dictionary"). It applies to every language.
 pub fn add_word(w: &str) {
-    if user_words().write().unwrap_or_else(|e| e.into_inner()).insert(w.to_lowercase()) {
+    if user_words().write().unwrap_or_else(|e| e.into_inner()).insert(dictionary_key(w)) {
         DICTIONARY_GENERATION.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 /// Take a word out of the user dictionary (File › Options › Proofing). Returns whether it was there.
 pub fn remove_word(w: &str) -> bool {
-    let removed = user_words().write().unwrap_or_else(|e| e.into_inner()).remove(&w.to_lowercase());
+    let removed = user_words().write().unwrap_or_else(|e| e.into_inner()).remove(&dictionary_key(w));
     if removed {
         DICTIONARY_GENERATION.fetch_add(1, Ordering::Relaxed);
     }
@@ -144,7 +152,7 @@ fn ignored_words() -> &'static RwLock<HashSet<String>> {
 /// Ignore a word everywhere until the app closes ("Ignore All"). Unlike [`add_word`] it isn't
 /// part of the user dictionary: it is never listed, saved or loaded, as in Word.
 pub fn ignore_word(w: &str) {
-    if ignored_words().write().unwrap_or_else(|e| e.into_inner()).insert(w.to_lowercase()) {
+    if ignored_words().write().unwrap_or_else(|e| e.into_inner()).insert(dictionary_key(w)) {
         DICTIONARY_GENERATION.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -208,10 +216,12 @@ pub fn dictionary_generation() -> u64 {
     DICTIONARY_GENERATION.load(Ordering::Relaxed)
 }
 
-/// Is `lower` (a lower-case word) in the user dictionary or ignored?
+/// Is `lower` (a lower-case word) in the user dictionary or ignored? It is looked up composed, as
+/// the entries are kept ([`dictionary_key`]).
 pub(crate) fn in_user_dictionary(lower: &str) -> bool {
-    user_words().read().unwrap_or_else(|e| e.into_inner()).contains(lower)
-        || ignored_words().read().unwrap_or_else(|e| e.into_inner()).contains(lower)
+    let key = composed(lower);
+    user_words().read().unwrap_or_else(|e| e.into_inner()).contains(&*key)
+        || ignored_words().read().unwrap_or_else(|e| e.into_inner()).contains(&*key)
 }
 
 /// Words in the user dictionary.
@@ -240,7 +250,7 @@ pub fn custom_word(w: &str) -> Option<String> {
     {
         return None;
     }
-    Some(w.to_lowercase())
+    Some(dictionary_key(w))
 }
 
 /// The valid words of the custom-dictionary file at `path`, reading at most
@@ -287,7 +297,7 @@ pub fn load_user_dictionary(path: &std::path::Path) -> Vec<String> {
 /// out. The file is replaced atomically: written beside it, then renamed over it. Errors (a
 /// read-only folder, a full disk) go back to the caller; the in-memory words are kept.
 pub fn save_user_dictionary(path: &std::path::Path, removed: &[String]) -> std::io::Result<()> {
-    let removed: HashSet<String> = removed.iter().map(|w| w.to_lowercase()).collect();
+    let removed: HashSet<String> = removed.iter().map(|w| dictionary_key(w)).collect();
     let on_disk = read_dictionary_file(path);
     {
         let mut set = user_words().write().unwrap_or_else(|e| e.into_inner());
@@ -346,7 +356,7 @@ fn known_core(w: &str) -> bool {
     if base_known(d, w) || COMMON.split(' ').any(|c| c == w) {
         return true;
     }
-    if user_words().read().unwrap_or_else(|e| e.into_inner()).contains(w) || ignored_words().read().unwrap_or_else(|e| e.into_inner()).contains(w) {
+    if in_user_dictionary(w) {
         return true;
     }
     // Inflections.
@@ -1650,6 +1660,46 @@ mod tests {
         assert!(matches!(composed("también"), std::borrow::Cow::Borrowed(_)) && matches!(composed("plain"), std::borrow::Cow::Borrowed(_)));
         pt::test_dict::install();
         assert!(is_correct_in("corac\u{327}a\u{303}o", ProofLang::Pt), "Portuguese gets the same composition");
+    }
+
+    /// #3562 review: Add to Dictionary, Ignore All, removal and the dictionary file use the same
+    /// composed key as spelling, so a word added or ignored decomposed is accepted in both forms,
+    /// an NFD entry in a saved file loads (and saves) composed, and either form removes it.
+    #[test]
+    fn user_dictionary_and_ignore_all_match_both_normalization_forms() {
+        es::test_dict::install();
+        let es = ProofLang::Es;
+        let (nfd, nfc) = ("zqprue\u{301}ba", "zqpruéba");
+        let text = format!("esto {nfd}");
+        let issues = check_text(&text, &[(0..text.len(), es)]);
+        assert_eq!(issues.iter().map(|i| (i.start, i.end)).collect::<Vec<_>>(), [(5, text.len())], "flagged at the typed bytes");
+        assert!(!is_correct_in(nfc, es));
+        add_word(nfd);
+        assert!(is_correct_in(nfd, es) && is_correct_in(nfc, es));
+        assert!(check_text(&text, &[(0..text.len(), es)]).is_empty());
+        assert!(user_dictionary().contains(&nfc.to_string()) && !user_dictionary().contains(&nfd.to_string()));
+        assert!(remove_word(nfc), "the composed form removes the entry added decomposed");
+        assert!(!is_correct_in(nfd, es) && !is_correct_in(nfc, es));
+        // Ignore All, either way round.
+        ignore_word("zqigno\u{301}ro");
+        assert!(is_correct_in("zqignóro", es) && is_correct_in("zqigno\u{301}ro", es));
+        ignore_word("zqcallé");
+        assert!(is_correct_in("zqcalle\u{301}", es));
+        // A dictionary file with a decomposed entry loads composed and is saved composed.
+        let path = std::env::temp_dir().join(format!("wc-nfd-dictionary-{}.txt", std::process::id()));
+        std::fs::write(&path, "zqguarda\u{301}do\nzqotra\n").unwrap();
+        let added = load_user_dictionary(&path);
+        assert!(added.contains(&"zqguardádo".to_string()) && !added.iter().any(|w| w.contains('\u{301}')), "{added:?}");
+        assert!(is_correct_in("zqguardádo", es) && is_correct_in("zqguarda\u{301}do", es));
+        save_user_dictionary(&path, &["zqotra".to_string()]).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.lines().any(|l| l == "zqguardádo") && !saved.contains('\u{301}') && !saved.lines().any(|l| l == "zqotra"), "{saved}");
+        // Removing the decomposed form takes out the composed entry, and the file follows.
+        assert!(remove_word("zqguarda\u{301}do"));
+        save_user_dictionary(&path, &["zqguarda\u{301}do".to_string()]).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().lines().any(|l| l == "zqguardádo"));
+        assert!(!is_correct_in("zqguardádo", es));
+        let _ = std::fs::remove_file(&path);
     }
 
     /// #100: runs in a language without a dictionary are never flagged; English still is.
