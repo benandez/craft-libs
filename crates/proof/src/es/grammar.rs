@@ -26,13 +26,13 @@ pub fn check(text: &str, lang: ProofLang) -> Vec<Issue> {
 }
 
 fn repeated_words(text: &str, ws: &[(usize, usize)], lang: ProofLang, v: &mut Vec<Issue>) {
+    // Letters and the combining marks of a decomposed word (`tambie\u{301}n`); a composed and a
+    // decomposed spelling of one word are the same word.
+    let letters = |w: &str| w.chars().all(|c| c.is_alphabetic() || unicode_normalization::char::is_combining_mark(c));
+    let folded = |w: &str| w.nfc().collect::<String>().to_lowercase();
     for pair in ws.windows(2) {
         let [(a0, b0), (a1, b1)] = pair else { continue };
         let (Some(w0), Some(w1), Some(gap)) = (text.get(*a0..*b0), text.get(*a1..*b1), text.get(*b0..*a1)) else { continue };
-        // Letters and the combining marks of a decomposed word (`tambie\u{301}n`); a composed and
-        // a decomposed spelling of one word are the same word.
-        let letters = |w: &str| w.chars().all(|c| c.is_alphabetic() || unicode_normalization::char::is_combining_mark(c));
-        let folded = |w: &str| w.nfc().collect::<String>().to_lowercase();
         if !gap.is_empty() && gap.chars().all(char::is_whitespace) && letters(w0) && folded(w0) == folded(w1) {
             v.push(issue(*a0, *b1, format!("Palabra repetida: «{w1}»"), vec![w0.to_string()], lang));
         }
@@ -83,10 +83,22 @@ fn spaces(text: &str, lang: ProofLang, v: &mut Vec<Issue>) {
     }
 }
 
-/// Characters a question or exclamation can't reach back past: sentence ends, clause breaks,
-/// line breaks, and the start of a quotation or parenthesis.
-fn is_boundary(c: char) -> bool {
-    matches!(c, '.' | '?' | '!' | '…' | ':' | ';' | '\n' | '\r' | '\t' | '«' | '“' | '"' | '(' | '[' | '—')
+/// Does the character `b` at byte `j` end what comes before it, so a question or exclamation after
+/// it starts there? Sentence ends, clause breaks, line breaks and the start of a quotation or
+/// parenthesis do, but not punctuation inside a word (`3.5`, `10:30`) or inside an address
+/// (`example.com`, `https:`), except a mark ending an address (`…/? Vienes mañana?`).
+fn ends_clause(text: &str, addresses: &[(usize, usize)], j: usize, b: char) -> bool {
+    let after = j + b.len_utf8();
+    if in_address(addresses, j) {
+        return matches!(b, '?' | '!' | '.') && addresses.iter().any(|&(_, e)| e == after);
+    }
+    let inside_word = matches!(b, '.' | ':' | ';') && text.get(after..).and_then(|r| r.chars().next()).is_some_and(char::is_alphanumeric);
+    !inside_word && matches!(b, '.' | '?' | '!' | '…' | ':' | ';' | '\n' | '\r' | '\t' | '«' | '“' | '"' | '(' | '[' | '—')
+}
+
+/// Is byte `j` inside one of the `addresses` ([`address_ranges`])?
+fn in_address(addresses: &[(usize, usize)], j: usize) -> bool {
+    addresses.iter().any(|&(s, e)| s <= j && j < e)
 }
 
 /// The byte ranges of the whitespace-delimited tokens of `text` that are web or e-mail addresses
@@ -112,10 +124,6 @@ fn address_ranges(text: &str) -> Vec<(usize, usize)> {
 /// (`example.com`, `3.5`, `10:30`) a sentence's start.
 fn opening_marks(text: &str, lang: ProofLang, v: &mut Vec<Issue>) {
     let addresses = address_ranges(text);
-    let in_address = |j: usize| addresses.iter().any(|&(s, e)| s <= j && j < e);
-    // An address's own punctuation starts no sentence, except a mark that ends it
-    // (`…/? Vienes mañana?`): that one isn't flagged, but whatever follows is a new sentence.
-    let ends_address = |j: usize, b: char| addresses.iter().any(|&(_, e)| j + b.len_utf8() == e) && matches!(b, '?' | '!' | '.');
     for (i, c) in text.char_indices() {
         let (opener, message) = match c {
             '?' => ('¿', "Falta el signo de interrogación de apertura (¿)"),
@@ -127,13 +135,14 @@ fn opening_marks(text: &str, lang: ProofLang, v: &mut Vec<Issue>) {
         let next = text.get(i + 1..).and_then(|r| r.chars().next());
         // `?!` and `!!!` are handled at their first mark; `(?)` stands alone; `?q=`, `a!b` and a
         // mark ending an address (`https://example.com/?`) aren't sentence ends.
-        if matches!(prev, Some('?' | '!')) || (prev == Some('(') && next == Some(')')) || next.is_some_and(char::is_alphanumeric) || in_address(i) {
+        if matches!(prev, Some('?' | '!'))
+            || (prev == Some('(') && next == Some(')'))
+            || next.is_some_and(char::is_alphanumeric)
+            || in_address(&addresses, i)
+        {
             continue;
         }
-        let within_word = |j: usize, b: char| text.get(j + b.len_utf8()..).and_then(|r| r.chars().next()).is_some_and(char::is_alphanumeric);
-        let from = before.char_indices().rev().find(|&(j, b)| {
-            matches!(b, '¿' | '¡') || ends_address(j, b) || (is_boundary(b) && !in_address(j) && !(matches!(b, '.' | ':' | ';') && within_word(j, b)))
-        });
+        let from = before.char_indices().rev().find(|&(j, b)| matches!(b, '¿' | '¡') || ends_clause(text, &addresses, j, b));
         if from.is_some_and(|(_, b)| matches!(b, '¿' | '¡')) {
             continue;
         }

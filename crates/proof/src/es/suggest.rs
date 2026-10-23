@@ -7,9 +7,7 @@
 
 use crate::ProofLang;
 use crate::affix::{AffixDict, Casing, capitalize, casing};
-
-/// Longest word suggestions are looked for, in letters (as in the shared ranking).
-const MAX_LETTERS: usize = 40;
+use crate::cs::suggest::MAX_LETTERS;
 
 /// Spelling suggestions for a word in `lang`'s Spanish, best first, at most `max`, in the word's
 /// case.
