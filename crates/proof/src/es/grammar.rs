@@ -6,6 +6,8 @@
 //! dices?`), and `(?)` and `(!)`, which mark doubt or surprise, stand alone. No other
 //! Spanish-specific grammar, comma or sentence-capital rules are inferred.
 
+use unicode_normalization::UnicodeNormalization;
+
 use crate::{Issue, IssueKind, ProofLang, words};
 
 fn issue(start: usize, end: usize, message: String, suggestions: Vec<String>, lang: ProofLang) -> Issue {
@@ -27,7 +29,11 @@ fn repeated_words(text: &str, ws: &[(usize, usize)], lang: ProofLang, v: &mut Ve
     for pair in ws.windows(2) {
         let [(a0, b0), (a1, b1)] = pair else { continue };
         let (Some(w0), Some(w1), Some(gap)) = (text.get(*a0..*b0), text.get(*a1..*b1), text.get(*b0..*a1)) else { continue };
-        if !gap.is_empty() && gap.chars().all(char::is_whitespace) && w0.chars().all(char::is_alphabetic) && w0.to_lowercase() == w1.to_lowercase() {
+        // Letters and the combining marks of a decomposed word (`tambie\u{301}n`); a composed and
+        // a decomposed spelling of one word are the same word.
+        let letters = |w: &str| w.chars().all(|c| c.is_alphabetic() || unicode_normalization::char::is_combining_mark(c));
+        let folded = |w: &str| w.nfc().collect::<String>().to_lowercase();
+        if !gap.is_empty() && gap.chars().all(char::is_whitespace) && letters(w0) && folded(w0) == folded(w1) {
             v.push(issue(*a0, *b1, format!("Palabra repetida: «{w1}»"), vec![w0.to_string()], lang));
         }
     }
@@ -83,8 +89,33 @@ fn is_boundary(c: char) -> bool {
     matches!(c, '.' | '?' | '!' | '…' | ':' | ';' | '\n' | '\r' | '\t' | '«' | '“' | '"' | '(' | '[' | '—')
 }
 
-/// A closing `?` or `!` whose sentence has no opening `¿` or `¡`.
+/// The byte ranges of the whitespace-delimited tokens of `text` that are web or e-mail addresses
+/// (`https://example.com/?`, `www.example.com`, `ana@example.com`), as spelling skips them.
+fn address_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut start = None;
+    // A final space ends the last token.
+    for (i, c) in text.char_indices().chain(std::iter::once((text.len(), ' '))) {
+        if !c.is_whitespace() {
+            start = start.or(Some(i));
+        } else if let Some(s) = start.take()
+            && text.get(s..i).is_some_and(crate::is_address)
+        {
+            out.push((s, i));
+        }
+    }
+    out
+}
+
+/// A closing `?` or `!` whose sentence has no opening `¿` or `¡`. Marks in web and e-mail
+/// addresses aren't sentence punctuation, and neither is punctuation inside an address or a word
+/// (`example.com`, `3.5`, `10:30`) a sentence's start.
 fn opening_marks(text: &str, lang: ProofLang, v: &mut Vec<Issue>) {
+    let addresses = address_ranges(text);
+    let in_address = |j: usize| addresses.iter().any(|&(s, e)| s <= j && j < e);
+    // An address's own punctuation starts no sentence, except a mark that ends it
+    // (`…/? Vienes mañana?`): that one isn't flagged, but whatever follows is a new sentence.
+    let ends_address = |j: usize, b: char| addresses.iter().any(|&(_, e)| j + b.len_utf8() == e) && matches!(b, '?' | '!' | '.');
     for (i, c) in text.char_indices() {
         let (opener, message) = match c {
             '?' => ('¿', "Falta el signo de interrogación de apertura (¿)"),
@@ -94,12 +125,15 @@ fn opening_marks(text: &str, lang: ProofLang, v: &mut Vec<Issue>) {
         let before = text.get(..i).unwrap_or("");
         let prev = before.chars().next_back();
         let next = text.get(i + 1..).and_then(|r| r.chars().next());
-        // `?!` and `!!!` are handled at their first mark; `(?)` stands alone; `?q=` and `a!b`
-        // aren't sentence ends.
-        if matches!(prev, Some('?' | '!')) || (prev == Some('(') && next == Some(')')) || next.is_some_and(char::is_alphanumeric) {
+        // `?!` and `!!!` are handled at their first mark; `(?)` stands alone; `?q=`, `a!b` and a
+        // mark ending an address (`https://example.com/?`) aren't sentence ends.
+        if matches!(prev, Some('?' | '!')) || (prev == Some('(') && next == Some(')')) || next.is_some_and(char::is_alphanumeric) || in_address(i) {
             continue;
         }
-        let from = before.char_indices().rev().find(|&(_, b)| is_boundary(b) || matches!(b, '¿' | '¡'));
+        let within_word = |j: usize, b: char| text.get(j + b.len_utf8()..).and_then(|r| r.chars().next()).is_some_and(char::is_alphanumeric);
+        let from = before.char_indices().rev().find(|&(j, b)| {
+            matches!(b, '¿' | '¡') || ends_address(j, b) || (is_boundary(b) && !in_address(j) && !(matches!(b, '.' | ':' | ';') && within_word(j, b)))
+        });
         if from.is_some_and(|(_, b)| matches!(b, '¿' | '¡')) {
             continue;
         }
@@ -163,6 +197,47 @@ mod tests {
         ] {
             assert!(messages(text).iter().all(|(_, m)| !m.starts_with("Falta")), "{text}: {:?}", messages(text));
         }
+    }
+
+    /// Maintainer review on #3562: a URL ending in `/?` isn't a question, and the dots and colons
+    /// of an address or a word (`example.com`, `https:`, `10:30`) don't start the sentence the
+    /// missing `¿` is offered for; ordinary questions are still checked.
+    #[test]
+    fn addresses_are_not_questions_or_sentence_starts() {
+        let missing = |text: &str| -> Vec<(String, Vec<String>)> {
+            check(text, ProofLang::Es)
+                .into_iter()
+                .filter(|i| i.message.starts_with("Falta"))
+                .map(|i| (text[i.start..i.end].to_string(), i.suggestions))
+                .collect()
+        };
+        for text in [
+            "Ver https://example.com/?",
+            "Ver https://example.com/? ¿Vienes?",
+            "Ver http://example.com/buscar/? y www.example.com/?",
+            "Escribí a ana@example.com!",
+            "¿Viste https://example.com/?",
+        ] {
+            assert!(missing(text).is_empty(), "{text}: {:?}", missing(text));
+        }
+        assert_eq!(
+            missing("Mirá https://example.com/ y decime si vienes?"),
+            [("Mirá https://example.com/ y decime si vienes?".to_string(), vec!["¿Mirá https://example.com/ y decime si vienes?".to_string()])]
+        );
+        assert_eq!(missing("Mirá example.com y decime si vienes?")[0].0, "Mirá example.com y decime si vienes?");
+        assert_eq!(missing("Son las 10:30, vienes?")[0].0, "Son las 10:30, vienes?");
+        assert_eq!(missing("Ver https://example.com/? Vienes mañana?"), [("Vienes mañana?".to_string(), vec!["¿Vienes mañana?".to_string()])]);
+        assert_eq!(missing("Llegó. Vienes?")[0].0, "Vienes?", "a full stop before a space still ends a sentence");
+    }
+
+    /// A word repeated once composed and once decomposed is still repeated.
+    #[test]
+    fn repeated_words_match_across_normalization_forms() {
+        let text = "también tambie\u{301}n";
+        let issues = check(text, ProofLang::Es);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!((issues[0].start, issues[0].end), (0, text.len()));
+        assert!(issues[0].message.starts_with("Palabra repetida"));
     }
 
     #[test]

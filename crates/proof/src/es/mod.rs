@@ -304,6 +304,25 @@ mod tests {
         assert!(is_correct("PRUEVA", ProofLang::Es), "direct checks keep the defaults");
     }
 
+    /// Maintainer review on #3562: a word typed decomposed (NFD: `e` + U+0301) is checked like its
+    /// composed form (NFC) and keeps its own byte range, accents and all.
+    #[test]
+    fn decomposed_accents_are_checked_like_composed_ones() {
+        test_dict::install();
+        for lang in VARIETIES {
+            for text in ["esto también", "esto tambie\u{301}n", "una cancio\u{301}n y pingu\u{308}ino", "CANCIO\u{301}N", "nin\u{303}o"] {
+                let issues = crate::check_text(text, &[(0..text.len(), lang)]);
+                assert!(issues.is_empty(), "{lang:?} {text:?}: {issues:?}");
+            }
+            // A misspelling that ends in a decomposed accent is flagged whole, at its own bytes.
+            let text = "esto es una prueva tambie\u{301}nn";
+            let issues = crate::check_text(text, &[(0..text.len(), lang)]);
+            let flagged: Vec<(&str, usize, usize)> = issues.iter().map(|i| (&text[i.start..i.end], i.start, i.end)).collect();
+            assert_eq!(flagged, [("prueva", 12, 18), ("tambie\u{301}nn", 19, text.len())], "{lang:?}");
+            assert!(crate::suggest_in("tambie\u{301}nn", 8, lang).contains(&"también".into()), "{lang:?}");
+        }
+    }
+
     #[test]
     fn forbidden_words_are_rejected_in_every_case() {
         test_dict::install();

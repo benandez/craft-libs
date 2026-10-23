@@ -626,11 +626,12 @@ fn damerau(a: &[char], b: &str) -> usize {
     prev.get(m).copied().unwrap_or(9)
 }
 
-/// Words in `text`: (byte start, byte end).
+/// Words in `text`: (byte start, byte end). Combining marks belong to the word they follow, so a
+/// word typed decomposed (`tambie\u{301}n`, NFD) is one word, as its precomposed form is.
 pub fn words(text: &str) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut start: Option<usize> = None;
-    let is_w = |c: char| c.is_alphanumeric() || c == '\'' || c == '’' || c == '-';
+    let is_w = |c: char| c.is_alphanumeric() || c == '\'' || c == '’' || c == '-' || unicode_normalization::char::is_combining_mark(c);
     for (i, c) in text.char_indices() {
         match (start, is_w(c)) {
             (None, true) => start = Some(i),
@@ -698,8 +699,13 @@ fn spelling_issues(text: &str, lang: impl Fn(usize) -> ProofLang, opts: &Options
 fn enclosing_token(text: &str, a: usize, b: usize) -> (usize, usize, bool) {
     let ts = text.get(..a).and_then(|t| t.rfind(char::is_whitespace)).map(|i| i + 1).unwrap_or(0);
     let te = text.get(b..).and_then(|t| t.find(char::is_whitespace)).map(|i| b + i).unwrap_or(text.len());
-    let token = text.get(ts..te).unwrap_or("");
-    (ts, te, token.contains("://") || token.contains('@') || token.starts_with("www."))
+    (ts, te, text.get(ts..te).is_some_and(is_address))
+}
+
+/// Does a whitespace-delimited token look like a web or e-mail address (`https://…`, `www.…`,
+/// `a@b.org`)? Spelling skips its words, and Spanish grammar its punctuation.
+pub(crate) fn is_address(token: &str) -> bool {
+    token.contains("://") || token.contains('@') || token.starts_with("www.")
 }
 
 /// The spelling issue of the word at `a..b` of `text`, if it is misspelled in `lang`. Words in
@@ -731,8 +737,21 @@ pub fn is_correct_in(word: &str, lang: ProofLang) -> bool {
     is_correct_in_with(word, lang, &Options::default())
 }
 
-/// [`is_correct_in`] with the File › Options › Proofing choices.
+/// `word` composed (NFC), as the dictionaries spell their words: `tambie\u{301}n` is looked up as
+/// `también`. Words already composed (all ASCII ones among them) are borrowed as they are.
+fn composed(word: &str) -> std::borrow::Cow<'_, str> {
+    use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
+    if word.is_ascii() || is_nfc_quick(word.chars()) == IsNormalized::Yes {
+        std::borrow::Cow::Borrowed(word)
+    } else {
+        std::borrow::Cow::Owned(word.nfc().collect())
+    }
+}
+
+/// [`is_correct_in`] with the File › Options › Proofing choices. A word with combining marks is
+/// checked as its composed form ([`composed`]).
 pub fn is_correct_in_with(word: &str, lang: ProofLang, opts: &Options) -> bool {
+    let word = &*composed(word);
     match lang {
         ProofLang::En | ProofLang::EnGb | ProofLang::EnCa => is_correct_english(word, lang, opts),
         ProofLang::Pl => accepted_by_options(word, opts) || pl::is_correct(word),
@@ -750,8 +769,10 @@ pub fn is_correct_in_with(word: &str, lang: ProofLang, opts: &Options) -> bool {
     }
 }
 
-/// Spelling suggestions for a word misspelled in `lang` (best first, at most `max`).
+/// Spelling suggestions for a word misspelled in `lang` (best first, at most `max`), composed
+/// ([`composed`]) like the dictionaries' words.
 pub fn suggest_in(word: &str, max: usize, lang: ProofLang) -> Vec<String> {
+    let word = &*composed(word);
     match lang {
         ProofLang::En | ProofLang::EnGb | ProofLang::EnCa => suggest_english(word, max, lang),
         ProofLang::Pl => pl::suggest(word, max),
@@ -1615,6 +1636,20 @@ mod tests {
             assert!(has_dictionary(Some(d)), "{d}");
             assert!(has_dictionary(Some(&format!("{}-XX", d.to_ascii_uppercase()))), "{d}");
         }
+    }
+
+    /// Combining marks stay in their word (#3562 review): a decomposed word is one word, with the
+    /// byte range of what was typed, and it is checked as its composed form in every language.
+    #[test]
+    fn decomposed_words_stay_whole() {
+        let text = "tambie\u{301}n, cafe\u{301}  \u{301}x";
+        let ws: Vec<&str> = words(text).into_iter().map(|(a, b)| &text[a..b]).collect();
+        assert_eq!(ws, ["tambie\u{301}n", "cafe\u{301}", "\u{301}x"]);
+        assert_eq!(words("tambie\u{301}n"), [(0, 9)]);
+        assert_eq!(&*composed("tambie\u{301}n"), "también");
+        assert!(matches!(composed("también"), std::borrow::Cow::Borrowed(_)) && matches!(composed("plain"), std::borrow::Cow::Borrowed(_)));
+        pt::test_dict::install();
+        assert!(is_correct_in("corac\u{327}a\u{303}o", ProofLang::Pt), "Portuguese gets the same composition");
     }
 
     /// #100: runs in a language without a dictionary are never flagged; English still is.
