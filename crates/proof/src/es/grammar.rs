@@ -89,16 +89,20 @@ fn spaces(text: &str, lang: ProofLang, v: &mut Vec<Issue>) {
 /// (`example.com`, `https:`), except a mark ending an address (`…/? Vienes mañana?`).
 fn ends_clause(text: &str, addresses: &[(usize, usize)], j: usize, b: char) -> bool {
     let after = j + b.len_utf8();
-    if in_address(addresses, j) {
-        return matches!(b, '?' | '!' | '.') && addresses.iter().any(|&(_, e)| e == after);
+    if let Some((_, end)) = address_at(addresses, j) {
+        return matches!(b, '?' | '!' | '.') && end == after;
     }
     let inside_word = matches!(b, '.' | ':' | ';') && text.get(after..).and_then(|r| r.chars().next()).is_some_and(char::is_alphanumeric);
     !inside_word && matches!(b, '.' | '?' | '!' | '…' | ':' | ';' | '\n' | '\r' | '\t' | '«' | '“' | '"' | '(' | '[' | '—')
 }
 
-/// Is byte `j` inside one of the `addresses` ([`address_ranges`])?
-fn in_address(addresses: &[(usize, usize)], j: usize) -> bool {
-    addresses.iter().any(|&(s, e)| s <= j && j < e)
+/// The one of the `addresses` ([`address_ranges`]) that byte `j` is inside, if any. The ranges come
+/// in text order and never overlap, so this is a binary search: a paragraph of thousands of
+/// addresses stays linear when every character before a question mark asks (#3562 review).
+fn address_at(addresses: &[(usize, usize)], j: usize) -> Option<(usize, usize)> {
+    let after_start = addresses.partition_point(|&(s, _)| s <= j);
+    let (s, e) = *addresses.get(after_start.checked_sub(1)?)?;
+    (s <= j && j < e).then_some((s, e))
 }
 
 /// The byte ranges of the whitespace-delimited tokens of `text` that are web or e-mail addresses
@@ -138,7 +142,7 @@ fn opening_marks(text: &str, lang: ProofLang, v: &mut Vec<Issue>) {
         if matches!(prev, Some('?' | '!'))
             || (prev == Some('(') && next == Some(')'))
             || next.is_some_and(char::is_alphanumeric)
-            || in_address(&addresses, i)
+            || address_at(&addresses, i).is_some()
         {
             continue;
         }
@@ -237,6 +241,44 @@ mod tests {
         assert_eq!(missing("Son las 10:30, vienes?")[0].0, "Son las 10:30, vienes?");
         assert_eq!(missing("Ver https://example.com/? Vienes mañana?"), [("Vienes mañana?".to_string(), vec!["¿Vienes mañana?".to_string()])]);
         assert_eq!(missing("Llegó. Vienes?")[0].0, "Vienes?", "a full stop before a space still ends a sentence");
+    }
+
+    #[test]
+    fn address_lookup_finds_the_range_a_byte_is_in() {
+        let ranges = [(2, 5), (7, 8), (10, 20)];
+        let inside = |j| address_at(&ranges, j);
+        assert_eq!([0, 1].map(inside), [None, None], "before the first");
+        assert_eq!([2, 3, 4].map(inside), [Some((2, 5)); 3], "the start is inside, the end is not");
+        assert_eq!([5, 6].map(inside), [None, None], "between ranges");
+        assert_eq!([7, 10, 19].map(inside), [Some((7, 8)), Some((10, 20)), Some((10, 20))]);
+        assert_eq!([8, 9, 20, 99].map(inside), [None; 4], "after a range, and after the last");
+        assert_eq!(address_at(&[], 3), None);
+    }
+
+    /// Maintainer review on #3562: a paragraph of thousands of addresses followed by a question was
+    /// checked in quadratic time (every character before the question scanned every address).
+    /// About 99 KB (under the 100,000-byte paragraph cap) took hundreds of milliseconds; it is now
+    /// linear: about 1 to 5 ms in a debug build, against about 300 ms for the scan, so the bound
+    /// below leaves room on a loaded machine and still catches a return to the quadratic lookup.
+    #[test]
+    fn many_addresses_before_a_question_stay_linear() {
+        for (unit, ending, whole_paragraph) in
+            [("https://x/ ", "Vienes?", true), ("https://x/? ", "Vienes?", false), ("www.x.com ", "Qué bien!", true)]
+        {
+            // As many as fit in about 99 KB: 9,000 of the first, as in the review.
+            let text = format!("{}{ending}", unit.repeat(99_000 / unit.len()));
+            assert!(text.len() < 100_000, "{}", text.len());
+            let started = std::time::Instant::now();
+            let issues = check(&text, ProofLang::Es);
+            let took = started.elapsed();
+            assert!(took < std::time::Duration::from_millis(75), "{unit:?} took {took:?}");
+            let missing: Vec<&Issue> = issues.iter().filter(|i| i.message.starts_with("Falta")).collect();
+            assert_eq!(missing.len(), 1, "{unit:?}: {missing:?}");
+            // The mark's sentence is the whole paragraph when the addresses don't end with a mark
+            // of their own, and only the last question when they do.
+            let want_start = if whole_paragraph { 0 } else { text.len() - ending.len() };
+            assert_eq!((missing[0].start, missing[0].end), (want_start, text.len()), "{unit:?}");
+        }
     }
 
     /// A word repeated once composed and once decomposed is still repeated.
