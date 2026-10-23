@@ -97,8 +97,9 @@ fn ends_clause(text: &str, addresses: &[(usize, usize)], j: usize, b: char) -> b
 }
 
 /// The one of the `addresses` ([`address_ranges`]) that byte `j` is inside, if any. The ranges come
-/// in text order and never overlap, so this is a binary search: a paragraph of thousands of
-/// addresses stays linear when every character before a question mark asks (#3562 review).
+/// in text order and never overlap, so this is a binary search, O(log m) for m addresses: a paragraph
+/// of thousands of addresses costs O(n log m) when every character before a question mark asks
+/// (#3562 review), not the O(n m) of a scan per character.
 fn address_at(addresses: &[(usize, usize)], j: usize) -> Option<(usize, usize)> {
     let after_start = addresses.partition_point(|&(s, _)| s <= j);
     let (s, e) = *addresses.get(after_start.checked_sub(1)?)?;
@@ -123,19 +124,32 @@ fn address_ranges(text: &str) -> Vec<(usize, usize)> {
     out
 }
 
-/// A closing `?` or `!` whose sentence has no opening `¿` or `¡`. Marks in web and e-mail
-/// addresses aren't sentence punctuation, and neither is punctuation inside an address or a word
+/// A closing `?` or `!` with no opening `¿` or `¡` before it. Openers are counted left to right, like
+/// brackets, and each closing mark takes one back (either opener pairs with either closer:
+/// `¡Qué dices?`), so what sits between them doesn't matter: quotes, parentheses, dashes, an
+/// ellipsis or an abbreviation's full stop (`¿Viene el Sr. García?`, `¿Leíste «Rayuela»?`) all belong
+/// to the question. Only a closing mark with nothing open is flagged, and then the sentence it
+/// closes starts after the last clause break ([`ends_clause`]). Marks in web and e-mail addresses
+/// aren't sentence punctuation, and neither is punctuation inside an address or a word
 /// (`example.com`, `3.5`, `10:30`) a sentence's start.
 fn opening_marks(text: &str, lang: ProofLang, v: &mut Vec<Issue>) {
     let addresses = address_ranges(text);
+    // Openers not closed yet: a run of them (`¡¡`) counts once, like a run of closers (`!!`).
+    let mut open = 0usize;
     for (i, c) in text.char_indices() {
+        let before = text.get(..i).unwrap_or("");
+        let prev = before.chars().next_back();
         let (opener, message) = match c {
+            '¿' | '¡' => {
+                if !matches!(prev, Some('¿' | '¡')) {
+                    open += 1;
+                }
+                continue;
+            }
             '?' => ('¿', "Falta el signo de interrogación de apertura (¿)"),
             '!' => ('¡', "Falta el signo de exclamación de apertura (¡)"),
             _ => continue,
         };
-        let before = text.get(..i).unwrap_or("");
-        let prev = before.chars().next_back();
         let next = text.get(i + 1..).and_then(|r| r.chars().next());
         // `?!` and `!!!` are handled at their first mark; `(?)` stands alone; `?q=`, `a!b` and a
         // mark ending an address (`https://example.com/?`) aren't sentence ends.
@@ -146,10 +160,11 @@ fn opening_marks(text: &str, lang: ProofLang, v: &mut Vec<Issue>) {
         {
             continue;
         }
-        let from = before.char_indices().rev().find(|&(j, b)| matches!(b, '¿' | '¡') || ends_clause(text, &addresses, j, b));
-        if from.is_some_and(|(_, b)| matches!(b, '¿' | '¡')) {
+        if open > 0 {
+            open -= 1;
             continue;
         }
+        let from = before.char_indices().rev().find(|&(j, b)| matches!(b, '¿' | '¡') || ends_clause(text, &addresses, j, b));
         let start = from.map_or(0, |(j, b)| j + b.len_utf8());
         let Some(sentence) = text.get(start..i) else { continue };
         let lead = sentence.len() - sentence.trim_start().len();
@@ -168,6 +183,15 @@ mod tests {
 
     fn messages(text: &str) -> Vec<(String, String)> {
         check(text, ProofLang::Es).into_iter().map(|i| (text[i.start..i.end].to_string(), i.message)).collect()
+    }
+
+    /// The missing-opening-mark issues of `text`: the flagged text and the suggestions offered.
+    fn missing(text: &str) -> Vec<(String, Vec<String>)> {
+        check(text, ProofLang::Es)
+            .into_iter()
+            .filter(|i| i.message.starts_with("Falta"))
+            .map(|i| (text[i.start..i.end].to_string(), i.suggestions))
+            .collect()
     }
 
     #[test]
@@ -217,13 +241,6 @@ mod tests {
     /// missing `¿` is offered for; ordinary questions are still checked.
     #[test]
     fn addresses_are_not_questions_or_sentence_starts() {
-        let missing = |text: &str| -> Vec<(String, Vec<String>)> {
-            check(text, ProofLang::Es)
-                .into_iter()
-                .filter(|i| i.message.starts_with("Falta"))
-                .map(|i| (text[i.start..i.end].to_string(), i.suggestions))
-                .collect()
-        };
         for text in [
             "Ver https://example.com/?",
             "Ver https://example.com/? ¿Vienes?",
@@ -243,6 +260,65 @@ mod tests {
         assert_eq!(missing("Llegó. Vienes?")[0].0, "Vienes?", "a full stop before a space still ends a sentence");
     }
 
+    /// Maintainer review on #3562: a correctly opened question or exclamation is never flagged,
+    /// whatever sits between its marks: quotes, an abbreviation's full stop, an ellipsis, a dash
+    /// aside, parentheses, nested questions, a line break.
+    #[test]
+    fn correctly_opened_questions_are_not_flagged() {
+        for text in [
+            "¿Leíste «Rayuela»?",
+            "¿Viene el Sr. García?",
+            "¿Y si... no viene?",
+            "¿Vendrás —preguntó Juan— mañana?",
+            "¿Qué significa (aquí) la palabra?",
+            "¿Has leído \"Rayuela\" de Cortázar?",
+            "¿Leíste “Rayuela”?",
+            "¿Es 'Rayuela' o 'Los premios'?",
+            "¿Y tú, qué opinas… vienes?",
+            "¿Dijo «¿qué?» o no?",
+            "¿Viene la Dra. López, es decir, la jefa (la de 2.5 años)?",
+            "¿Dónde: aquí o allí?",
+            "¿Cuánto cuesta: 3,50 o a las 10:30?",
+            "¿Vienes a las 10:30; o mejor mañana?",
+            "¡Qué dices, Dr. Pérez!",
+            "¡Qué dices, Dr. Pérez? ¡Basta!",
+            "¡¡Hola!! ¿Qué tal?",
+            "¡¡¡Basta!!!",
+            "¿Vienes?!",
+            "¿Qué?! ¡No!",
+            "¿Vienes?\n¿O no?",
+            "¿Vienes\nmañana?",
+            "Ana dijo: «¿Vienes?» y yo: «Sí».",
+            "—¿Vienes? —preguntó Juan.",
+            "¿Viste https://example.com/? Dime.",
+            "¿Es verdad (!) o no?",
+            "Nació en 1950 (?) en Montevideo.",
+        ] {
+            assert!(missing(text).is_empty(), "{text:?}: {:?}", missing(text));
+        }
+    }
+
+    /// A closing mark with nothing open is still flagged, after a sentence or a clause that closed
+    /// an earlier question, and with the sentence it closes offered with its opening mark.
+    #[test]
+    fn closing_marks_with_nothing_open_are_still_flagged() {
+        for (text, flagged, offered) in [
+            ("Vienes mañana?", "Vienes mañana?", "¿Vienes mañana?"),
+            ("Llegó. Vienes?", "Vienes?", "¿Vienes?"),
+            ("Le preguntó: vienes?", "vienes?", "¿vienes?"),
+            ("Dijo «vienes?»", "vienes?", "¿vienes?"),
+            ("Qué bien!", "Qué bien!", "¡Qué bien!"),
+            ("¿Vienes? No sé qué hacer?", "No sé qué hacer?", "¿No sé qué hacer?"),
+            ("¿Viene el Sr. García? Llegó tarde!", "Llegó tarde!", "¡Llegó tarde!"),
+            ("¡¡Hola!! Qué bien!", "Qué bien!", "¡Qué bien!"),
+            ("¿Qué?! No sé qué decir!", "No sé qué decir!", "¡No sé qué decir!"),
+        ] {
+            let found = missing(text);
+            assert_eq!(found.len(), 1, "{text:?}: {found:?}");
+            assert_eq!((found[0].0.as_str(), found[0].1.first().map(String::as_str)), (flagged, Some(offered)), "{text:?}");
+        }
+    }
+
     #[test]
     fn address_lookup_finds_the_range_a_byte_is_in() {
         let ranges = [(2, 5), (7, 8), (10, 20)];
@@ -258,10 +334,11 @@ mod tests {
     /// Maintainer review on #3562: a paragraph of thousands of addresses followed by a question was
     /// checked in quadratic time (every character before the question scanned every address).
     /// About 99 KB (under the 100,000-byte paragraph cap) took hundreds of milliseconds; it is now
-    /// linear: about 1 to 5 ms in a debug build, against about 300 ms for the scan, so the bound
-    /// below leaves room on a loaded machine and still catches a return to the quadratic lookup.
+    /// O(n log m): about 1 to 5 ms in a debug build, against about 300 ms for the scan, so the
+    /// bound below leaves room on a loaded machine and still catches a return to the quadratic
+    /// lookup.
     #[test]
-    fn many_addresses_before_a_question_stay_linear() {
+    fn many_addresses_before_a_question_are_checked_quickly() {
         for (unit, ending, whole_paragraph) in
             [("https://x/ ", "Vienes?", true), ("https://x/? ", "Vienes?", false), ("www.x.com ", "Qué bien!", true)]
         {

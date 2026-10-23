@@ -1058,12 +1058,16 @@ mod tests {
 
     use super::*;
 
+    /// Held by tests that swap or rely on the shared Spanish dictionary, so a folder reset can't land mid-test.
+    static DICTIONARY_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// #1063: the dictionaries folder is searched before the system locations; the dictionaries
     /// in it are reported and used, and cached checks are dropped. The folder holds the same test
     /// dictionaries the other tests install, so tests running meanwhile see the same words; it
     /// stays set for the rest of the run for that reason.
     #[test]
     fn dictionaries_folder_is_searched_first() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = std::env::temp_dir().join(format!("wc-proof-dictionaries-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         for (name, aff, dic) in [
@@ -1694,6 +1698,7 @@ mod tests {
     /// an NFD entry in a saved file loads (and saves) composed, and either form removes it.
     #[test]
     fn user_dictionary_and_ignore_all_match_both_normalization_forms() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         es::test_dict::install();
         let es = ProofLang::Es;
         let (nfd, nfc) = ("zqprue\u{301}ba", "zqpruéba");
