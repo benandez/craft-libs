@@ -1,0 +1,39 @@
+name: Regex
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['crates/regex/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/regex.yml']
+  pull_request:
+    paths: ['crates/regex/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/regex.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  regex:
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt -p craft-regex --check
+      - run: cargo clippy -p craft-regex --all-targets --locked -- -D warnings
+      - run: cargo test -p craft-regex --locked
+  wasm:
+    timeout-minutes: 15
+    name: Regex WASM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: wasm32-unknown-unknown
+      - run: cargo build -p craft-regex --locked --target wasm32-unknown-unknown

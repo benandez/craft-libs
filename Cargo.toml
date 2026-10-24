@@ -62,3 +62,7 @@ hayro-syntax = { path = "vendor/hayro-syntax" }
 hayro-jbig2 = { path = "vendor/hayro-jbig2" }
 hayro-cmap = { path = "vendor/hayro-cmap" }
 hayro-postscript = { path = "vendor/hayro-postscript" }
+
+# The regex hostile tests assert < 100 ms per search; unoptimized code is ~10x slower.
+[profile.dev.package.craft-regex]
+opt-level = 3

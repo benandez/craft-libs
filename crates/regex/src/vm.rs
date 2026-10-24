@@ -73,7 +73,7 @@ struct Machine<'a> {
     marks: Vec<usize>,
     calls: Vec<Frame>,
     stack: Vec<Entry>,
-    /// Registers held by `CallPopped` entries, counted against `max_stack`.
+    /// Registers held by call frames (live or in `CallPopped`), counted against `max_stack`.
     heavy: usize,
 }
 
@@ -112,7 +112,10 @@ pub(crate) fn search(
 
 impl Machine<'_> {
     fn next_char(&self, pos: usize) -> Option<char> {
-        self.hay.get(pos..)?.chars().next()
+        match self.hay.as_bytes().get(pos) {
+            Some(&b) if b.is_ascii() => Some(char::from(b)),
+            _ => self.hay.get(pos..)?.chars().next(),
+        }
     }
 
     fn prev_char(&self, pos: usize) -> Option<char> {
@@ -240,12 +243,11 @@ impl Machine<'_> {
                 }
             }
             Entry::CallPushed => {
-                self.calls.pop();
+                if let Some(f) = self.calls.pop() {
+                    self.heavy = self.heavy.saturating_sub(f.weight());
+                }
             }
-            Entry::CallPopped(f) => {
-                self.heavy = self.heavy.saturating_sub(f.weight());
-                self.calls.push(*f);
-            }
+            Entry::CallPopped(f) => self.calls.push(*f),
             Entry::Alt { .. } | Entry::Behind { .. } | Entry::Barrier { .. } => {}
         }
     }
@@ -373,6 +375,7 @@ impl Machine<'_> {
                         Some(start) => {
                             let frame = Frame { group: g, ret: next, regs: self.regs.clone(), marks: self.marks.clone() };
                             self.push(Entry::CallPushed)?;
+                            self.heavy = self.heavy.saturating_add(frame.weight());
                             self.calls.push(frame);
                             pc = start;
                             true
@@ -474,7 +477,6 @@ impl Machine<'_> {
             }
         }
         let ret = frame.ret;
-        self.heavy = self.heavy.saturating_add(frame.weight());
         self.push(Entry::CallPopped(Box::new(frame)))?;
         Ok(ret)
     }

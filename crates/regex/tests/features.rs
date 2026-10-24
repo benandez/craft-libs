@@ -285,5 +285,5 @@ fn unsupported_and_errors() {
         }
     }
     assert_eq!(err("\\k<nope>"), Error::Syntax { pos: 0, msg: "reference to non-existent group name 'nope'".into() });
-    assert!(Regex::new(&"a".repeat(1_001), &Options::default()) .is_err());
+    assert!(Regex::new(&"a".repeat(1_001), &Options::default()).is_err());
 }
