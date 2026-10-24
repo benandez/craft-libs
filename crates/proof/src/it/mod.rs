@@ -29,7 +29,7 @@ pub use suggest::suggest;
 const NAMES: &[&str] = &["it_IT", "it_CH", "it-IT", "it"];
 
 /// The Italian dictionary, found on first use (see [`DictSlot`]).
-static DICT: DictSlot<AffixDict> = DictSlot::new(NAMES, "Italian");
+pub(crate) static DICT: DictSlot<AffixDict> = DictSlot::new(NAMES, "Italian");
 
 /// The Italian dictionary: the installed Hunspell `it_IT` (read on first use), one given with
 /// [`install_dictionary`], or an empty one when none is available (Italian spelling is off
@@ -42,18 +42,6 @@ pub fn dictionary() -> Arc<AffixDict> {
 /// UTF-8), for example one the user picked. On error the current dictionary stays.
 pub fn install_dictionary(aff: &str, dic: &str) -> Result<(), String> {
     DICT.install(aff, dic)
-}
-
-/// Forget the loaded dictionary, so the next check looks for an installed one again (after
-/// [`crate::hunspell::set_dictionary_dir`] or a dictionary was installed).
-pub fn reload_dictionary() {
-    DICT.reload();
-}
-
-/// The `.dic` file of the installed Italian dictionary (File › Options › Proofing shows it);
-/// `None` when there is none, or when one given with [`install_dictionary`] is in use.
-pub fn installed_path() -> Option<std::path::PathBuf> {
-    DICT.installed_path()
 }
 
 /// Is an Italian dictionary available (spelling is checked)?

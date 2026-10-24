@@ -25,10 +25,10 @@ use crate::slot::DictSlot;
 pub use suggest::suggest;
 
 /// The dictionary of each variety, found on first use (see [`DictSlot`]).
-static SPAIN_DICT: DictSlot<AffixDict> = DictSlot::new(SPAIN, "Spanish (Spain)");
-static MEXICO_DICT: DictSlot<AffixDict> = DictSlot::new(MEXICO, "Spanish (Mexico)");
-static LATIN_AMERICA_DICT: DictSlot<AffixDict> = DictSlot::new(LATIN_AMERICA, "Spanish (Latin America)");
-static URUGUAY_DICT: DictSlot<AffixDict> = DictSlot::new(URUGUAY, "Spanish (Uruguay)");
+pub(crate) static SPAIN_DICT: DictSlot<AffixDict> = DictSlot::new(SPAIN, "Spanish (Spain)");
+pub(crate) static MEXICO_DICT: DictSlot<AffixDict> = DictSlot::new(MEXICO, "Spanish (Mexico)");
+pub(crate) static LATIN_AMERICA_DICT: DictSlot<AffixDict> = DictSlot::new(LATIN_AMERICA, "Spanish (Latin America)");
+pub(crate) static URUGUAY_DICT: DictSlot<AffixDict> = DictSlot::new(URUGUAY, "Spanish (Uruguay)");
 
 /// File names of a Spanish Hunspell dictionary for Spain, most specific first (`es_ANY` is the
 /// generic one RLA-ES publishes).
@@ -70,21 +70,6 @@ pub fn dictionary(lang: ProofLang) -> Arc<AffixDict> {
 /// decoded to UTF-8), for example one the user picked. On error the current dictionary stays.
 pub fn install_dictionary(lang: ProofLang, aff: &str, dic: &str) -> Result<(), String> {
     slot(lang).install(aff, dic)
-}
-
-/// Forget every variety's loaded dictionary, so the next check looks for an installed one again
-/// (after [`crate::hunspell::set_dictionary_dir`] or a dictionary was installed).
-pub fn reload_dictionary() {
-    for slot in [&SPAIN_DICT, &MEXICO_DICT, &LATIN_AMERICA_DICT, &URUGUAY_DICT] {
-        slot.reload();
-    }
-}
-
-/// The `.dic` file of the Hunspell dictionary `lang`'s variety finds in the dictionaries folder
-/// or the system locations now (File › Options › Proofing shows it); `None` when there is none,
-/// or when one given with [`install_dictionary`] is in use.
-pub fn installed_path(lang: ProofLang) -> Option<std::path::PathBuf> {
-    slot(lang).installed_path()
 }
 
 /// Is a dictionary available for `lang`'s variety (spelling is checked)?

@@ -30,6 +30,37 @@ impl Dictionary for AffixDict {
     }
 }
 
+/// What every language's slot answers, whatever its dictionary type (the language table in
+/// lib.rs holds them side by side).
+pub(crate) trait Slot: Sync {
+    /// See [`DictSlot::name`].
+    fn name(&self) -> &'static str;
+    /// See [`DictSlot::installed_path`].
+    fn installed_path(&self) -> Option<PathBuf>;
+    /// See [`DictSlot::has_dictionary`].
+    fn has_dictionary(&self) -> bool;
+    /// See [`DictSlot::reload`].
+    fn reload(&self);
+}
+
+impl<D: Dictionary> Slot for DictSlot<D> {
+    fn name(&self) -> &'static str {
+        DictSlot::name(self)
+    }
+
+    fn installed_path(&self) -> Option<PathBuf> {
+        DictSlot::installed_path(self)
+    }
+
+    fn has_dictionary(&self) -> bool {
+        DictSlot::has_dictionary(self)
+    }
+
+    fn reload(&self) {
+        DictSlot::reload(self);
+    }
+}
+
 /// The dictionary in use and whether it came from [`DictSlot::install`] rather than a file on
 /// disk (it then has no file to report, even if a matching file also happens to exist): one lock,
 /// so a reload and an install can't interleave their two fields.

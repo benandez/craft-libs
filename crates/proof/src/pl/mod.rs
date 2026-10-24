@@ -28,7 +28,7 @@ pub use suggest::suggest;
 const NAMES: &[&str] = &["pl_PL", "pl-PL", "pl"];
 
 /// The Polish dictionary, found on first use (see [`DictSlot`]).
-static DICT: DictSlot<AffixDict> = DictSlot::new(NAMES, "Polish");
+pub(crate) static DICT: DictSlot<AffixDict> = DictSlot::new(NAMES, "Polish");
 
 /// The Polish dictionary: the installed Hunspell `pl_PL` (read on first use), one given with
 /// [`install_dictionary`], or an empty one when none is available (Polish spelling is off
@@ -41,18 +41,6 @@ pub fn dictionary() -> Arc<AffixDict> {
 /// UTF-8), for example one the user picked. On error the current dictionary stays.
 pub fn install_dictionary(aff: &str, dic: &str) -> Result<(), String> {
     DICT.install(aff, dic)
-}
-
-/// Forget the loaded dictionary, so the next check looks for an installed one again (after
-/// [`crate::hunspell::set_dictionary_dir`] or a dictionary was installed).
-pub fn reload_dictionary() {
-    DICT.reload();
-}
-
-/// The `.dic` file of the installed Polish dictionary (File › Options › Proofing shows it);
-/// `None` when there is none, or when one given with [`install_dictionary`] is in use.
-pub fn installed_path() -> Option<std::path::PathBuf> {
-    DICT.installed_path()
 }
 
 /// Is a Polish dictionary available (spelling is checked)?
