@@ -58,9 +58,11 @@ pub(crate) enum Inst {
         restore: bool,
         behind: bool,
     },
-    /// End of a negative lookaround: the body matched, so undo it, then jump to `then` (or fail).
+    /// End of a negative lookaround: the body matched (for a lookbehind, if it ends where the
+    /// barrier started), so undo it, then jump to `then` (or fail).
     NegEnd {
         then: Option<usize>,
+        behind: bool,
     },
     MarkSet(usize),
     /// Loop back to `to` unless the iteration matched nothing.
@@ -80,7 +82,7 @@ impl Inst {
             Inst::CondGroup { group, no } => Inst::CondGroup { group, no: f(no) },
             Inst::CondRec { group, no } => Inst::CondRec { group, no: f(no) },
             Inst::Barrier { fail, behind } => Inst::Barrier { fail: fail.map(&f), behind },
-            Inst::NegEnd { then } => Inst::NegEnd { then: then.map(&f) },
+            Inst::NegEnd { then, behind } => Inst::NegEnd { then: then.map(&f), behind },
             Inst::LoopBack { mark, to } => Inst::LoopBack { mark, to: f(to) },
             other => other,
         }
@@ -415,7 +417,7 @@ impl Emitter<'_> {
     /// if the body matches (else it fails).
     fn look(&self, behind: bool, negate: bool, body: NodeId, fail: Option<usize>, then: Option<usize>) -> Vec<Work> {
         let range = behind.then(|| self.infos.get(body).map_or((0, 0), |b| (b.min, b.max.unwrap_or(b.min))));
-        let end = if negate { Inst::NegEnd { then } } else { Inst::Cut { restore: true, behind } };
+        let end = if negate { Inst::NegEnd { then, behind } } else { Inst::Cut { restore: true, behind } };
         vec![Work::Inst(Inst::Barrier { fail, behind: range }), Work::Node(body), Work::Inst(end)]
     }
 }

@@ -104,6 +104,9 @@ fn lookaround() {
     assert_eq!(caps(r"(?=(\w+))\w", "ab"), Some(vec![Some("a"), Some("ab")]), "positive lookahead keeps captures");
     assert_eq!(caps(r"(?!(a)b)\w", "ac"), Some(vec![Some("a"), None]), "negative lookahead drops captures");
     assert_eq!(m(r"(?<=é)x", "éx"), Some("x"));
+    assert_eq!(m(r"(?<!a|bc)c", "bc"), Some("c"), "a body that ends elsewhere doesn't count");
+    assert_eq!(m(r"(?<!a|bc)d", "bcd"), None);
+    assert_eq!(m(r"^.(?(?<!a|bc)c|x)", "bc"), Some("bc"));
     assert!(matches!(err(r"(?<=a+)b"), Error::Syntax { .. }));
     assert!(matches!(err(r"(?<=a{256})b"), Error::Syntax { .. }));
     assert!(Regex::new(r"(?<=a{255})b", &Options::default()).is_ok());
@@ -286,4 +289,20 @@ fn unsupported_and_errors() {
     }
     assert_eq!(err("\\k<nope>"), Error::Syntax { pos: 0, msg: "reference to non-existent group name 'nope'".into() });
     assert!(Regex::new(&"a".repeat(1_001), &Options::default()).is_err());
+}
+
+#[test]
+fn readme_claims() {
+    assert_eq!(caps("(?:(a|))*", "a"), Some(vec![Some("a"), Some("")]), "empty last iteration keeps its captures");
+    assert_eq!(m(r"(a|b)\g<1>\g'1'", "aba"), Some("aba"), "Oniguruma-style subroutine calls");
+    assert_eq!(m(r"(x)?(?(-1)y|z)", "xy"), Some("xy"));
+    assert_eq!(m(r"(x)?(?(-1)y|z)", "z"), Some("z"));
+    assert_eq!(m(r"^(?<n>x)?(?(n)y|z)$", "xy"), Some("xy"), "bare name condition");
+    assert_eq!(m(r"(\[(?:[^\[\]]|(?1))*\])(?(R1)!|\.)", "[[a]]."), Some("[[a]]."));
+    assert_eq!(m(r"(?<b>\[(?:[^\[\]]|(?&b))*\])(?(R&b)!|\.)", "[a]."), Some("[a]."));
+    assert_eq!(m(r"\011", "\t"), Some("\t"));
+    assert_eq!(m(r"a(?#comment)b", "ab"), Some("ab"));
+    assert_eq!(m(r"(?im-s)^A.", "x\na\n"), None);
+    assert_eq!(m(r"(?im-s)^A.", "x\nab"), Some("ab"));
+    assert_eq!(m(r"(?<=\Qa.\E)b", "a.b"), Some("b"));
 }

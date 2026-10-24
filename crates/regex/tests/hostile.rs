@@ -53,8 +53,9 @@ fn recursion_without_base_case() {
 fn deep_nesting() {
     let deep = |n: usize| format!("{}a{}", "(".repeat(n), ")".repeat(n));
     assert_eq!(default(&deep(1_000), "a"), Err(Error::TooComplex), "pattern too long");
-    assert_eq!(run(&deep(1_000), &Options { max_pattern: 10_000, ..Options::default() }, "a"), Err(Error::TooComplex));
-    assert_eq!(run(&deep(999), &Options { max_pattern: 10_000, ..Options::default() }, "a"), Ok(true));
+    let long = Options { max_pattern: 10_000, ..Options::default() };
+    assert_eq!(run(&deep(1_001), &long, "a"), Err(Error::TooComplex), "deeper than max_depth");
+    assert_eq!(run(&deep(1_000), &long, "a"), Ok(true));
     assert_eq!(run(&deep(50_000), &big(), "a"), Ok(true), "no Rust recursion anywhere");
     let deep_nc = format!("{}a{}", "(?:".repeat(50_000), ")*".repeat(50_000));
     let _ = run(&deep_nc, &big(), "aaa");

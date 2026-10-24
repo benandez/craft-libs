@@ -167,7 +167,7 @@ impl Parser {
             match c {
                 '(' => {
                     self.open(&mut frames, pos)?;
-                    if frames.len() > max_depth {
+                    if frames.len().saturating_sub(1) > max_depth {
                         return Err(Error::TooComplex);
                     }
                 }

@@ -427,14 +427,22 @@ impl Machine<'_> {
                         true
                     }
                 }
-                Some(Inst::NegEnd { then }) => {
-                    pos = self.unwind(b)?;
-                    match then {
-                        Some(t) => {
-                            pc = t;
-                            true
+                Some(Inst::NegEnd { then, behind }) => {
+                    let start = match self.barrier().and_then(|at| self.stack.get(at)) {
+                        Some(Entry::Barrier { pos, .. }) => *pos,
+                        _ => pos,
+                    };
+                    if behind && start != pos {
+                        false
+                    } else {
+                        pos = self.unwind(b)?;
+                        match then {
+                            Some(t) => {
+                                pc = t;
+                                true
+                            }
+                            None => false,
                         }
-                        None => false,
                     }
                 }
                 Some(Inst::MarkSet(mark)) => {

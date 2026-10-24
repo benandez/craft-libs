@@ -13,6 +13,18 @@
 //! compiler and matcher all keep their own heap stacks.
 //!
 //! Matching is leftmost-first (Perl), one `char` at a time. Positions are byte offsets.
+//!
+//! ```
+//! use craft_regex::{Budget, Options, Regex};
+//!
+//! let re = Regex::new(r"\b(\w+) \1\b", &Options::default())?;
+//! let hay = "this is is a test";
+//! let mut budget = Budget::new(10_000_000);
+//! let caps = re.captures_at(hay, 0..hay.len(), &mut budget)?.expect("a doubled word");
+//! assert_eq!(caps.get(0), Some(5..10));
+//! assert_eq!(caps.get(1), Some(5..7));
+//! # Ok::<(), craft_regex::Error>(())
+//! ```
 
 use std::fmt;
 use std::ops::Range;
