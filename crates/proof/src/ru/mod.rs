@@ -109,7 +109,7 @@ pub fn has_dictionary() -> bool {
 
 /// Is `c` a letter of the Cyrillic script (the only one the Russian dictionary covers)?
 pub(crate) fn is_cyrillic(c: char) -> bool {
-    matches!(c, '\u{0400}'..='\u{04FF}' | '\u{0500}'..='\u{052F}')
+    matches!(c, '\u{0400}'..='\u{052F}')
 }
 
 /// Particles joined to a word with a hyphen (`кто-то`, `где-нибудь`, `давай-ка`, `всё-таки`,
