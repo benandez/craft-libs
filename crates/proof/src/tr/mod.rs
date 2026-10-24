@@ -15,6 +15,8 @@ pub mod dict;
 pub mod grammar;
 pub mod hyphen;
 pub mod suggest;
+#[cfg(test)]
+pub(crate) mod test_dict;
 
 use std::sync::{Arc, RwLock};
 
@@ -87,15 +89,26 @@ pub fn is_correct(word: &str) -> bool {
     is_correct_with(&dictionary(), word)
 }
 
+/// [`is_correct`] with the File › Options › Proofing choices: with Ignore words that contain
+/// numbers off, words with digits are checked against the dictionary too.
+pub fn is_correct_with_options(word: &str, opts: &crate::Options) -> bool {
+    check(&dictionary(), word, opts)
+}
+
 /// [`is_correct`] against a given dictionary.
 pub fn is_correct_with(d: &TrDict, word: &str) -> bool {
+    check(d, word, &crate::Options::default())
+}
+
+/// [`is_correct_with_options`] against a given dictionary.
+fn check(d: &TrDict, word: &str, opts: &crate::Options) -> bool {
     if d.is_empty() {
         return true; // No Turkish dictionary installed: no spelling marks
     }
     let w = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '’');
     let w = w.trim_matches(['\'', '’']);
     let n = w.chars().count();
-    if n <= 1 || w.chars().any(|c| c.is_ascii_digit()) || !w.chars().any(char::is_alphabetic) {
+    if n <= 1 || (opts.ignore_numbers && w.chars().any(|c| c.is_ascii_digit())) || !w.chars().any(char::is_alphabetic) {
         return true;
     }
     // Check user dictionary first
@@ -120,7 +133,7 @@ pub fn is_correct_with(d: &TrDict, word: &str) -> bool {
     }
 
     // Compound words separated by hyphens (e.g., `afyon-karahisar`)
-    if w.contains('-') && w.split('-').all(|part| part.is_empty() || is_correct_with(d, part)) {
+    if w.contains('-') && w.split('-').all(|part| part.is_empty() || check(d, part, opts)) {
         return true;
     }
 
@@ -146,11 +159,8 @@ mod tests {
     }
 
     #[test]
-    fn installed_dictionary_checks_words_if_present() {
-        // Machines without a Turkish Hunspell dictionary (CI, most desktops) have nothing to check.
-        if !has_dictionary() {
-            return;
-        }
+    fn installed_dictionary_checks_words() {
+        test_dict::install();
         assert!(is_correct("kitap"));
         assert!(is_correct("kitaplar"));
         assert!(is_correct("evde"));
@@ -164,5 +174,20 @@ mod tests {
         assert!(!is_correct("benimbilmedigimkelime"));
         crate::add_word("benimbilmedigimkelime");
         assert!(is_correct("benimbilmedigimkelime"));
+    }
+
+    /// With Ignore words that contain numbers off, Turkish checks words with digits against the
+    /// dictionary instead of accepting them, hyphen parts included.
+    #[test]
+    fn proofing_options_reach_the_turkish_check() {
+        test_dict::install();
+        let lang = crate::ProofLang::Tr;
+        let defaults = crate::Options::default();
+        let check_digits = crate::Options { ignore_numbers: false, ..defaults };
+        assert!(crate::is_correct_in_with("kitapp2", lang, &defaults));
+        assert!(!crate::is_correct_in_with("kitapp2", lang, &check_digits));
+        assert!(!crate::is_correct_in_with("ev-kitapp2", lang, &check_digits));
+        assert!(crate::is_correct_in_with("2026", lang, &check_digits), "numbers alone stay correct");
+        assert!(is_correct("kitapp2"), "direct checks keep the defaults");
     }
 }

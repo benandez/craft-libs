@@ -130,18 +130,30 @@ pub fn is_correct(word: &str) -> bool {
     is_correct_with(&dictionary(), word)
 }
 
+/// [`is_correct`] with the File › Options › Proofing choices: with Ignore words in UPPERCASE off,
+/// short words in capitals are checked against the dictionary too, and with Ignore words that
+/// contain numbers off, so are words with digits or superscripts.
+pub fn is_correct_with_options(word: &str, opts: &crate::Options) -> bool {
+    check(&dictionary(), word, opts)
+}
+
 /// [`is_correct`] against a given dictionary (an empty one accepts everything).
 pub fn is_correct_with(d: &AffixDict, word: &str) -> bool {
+    check(d, word, &crate::Options::default())
+}
+
+/// [`is_correct_with_options`] against a given dictionary.
+fn check(d: &AffixDict, word: &str, opts: &crate::Options) -> bool {
     if d.is_empty() {
         return true; // no Russian dictionary installed: no spelling marks
     }
     let w = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '-');
     let w = w.trim_matches('-');
     let n = w.chars().count();
-    if n <= 1 || w.chars().any(char::is_numeric) || !w.chars().any(char::is_alphabetic) {
+    if n <= 1 || (opts.ignore_numbers && w.chars().any(char::is_numeric)) || !w.chars().any(char::is_alphabetic) {
         return true;
     }
-    if w.chars().all(|c| !c.is_lowercase()) && n <= ABBREVIATION_LETTERS {
+    if opts.ignore_uppercase && w.chars().all(|c| !c.is_lowercase()) && n <= ABBREVIATION_LETTERS {
         return true;
     }
     // Camel case (`ВКонтакте`, `МирКрасок`): a brand or an identifier, not a dictionary word.
@@ -161,7 +173,7 @@ pub fn is_correct_with(d: &AffixDict, word: &str) -> bool {
         return true;
     }
     if w.contains('-') {
-        return hyphenated(d, w);
+        return hyphenated(d, w, opts);
     }
     solid_compound(d, w)
 }
@@ -340,7 +352,7 @@ fn known(d: &AffixDict, w: &str) -> bool {
 
 /// A hyphenated word that isn't in the dictionary whole: its parts, with the particles,
 /// prefixes and linking vowels Russian joins with a hyphen.
-fn hyphenated(d: &AffixDict, w: &str) -> bool {
+fn hyphenated(d: &AffixDict, w: &str, opts: &crate::Options) -> bool {
     let parts: Vec<&str> = w.split('-').collect();
     if parts.iter().any(|p| p.is_empty()) || parts.len() > 4 {
         return false;
@@ -353,7 +365,7 @@ fn hyphenated(d: &AffixDict, w: &str) -> bool {
         && lp.iter().skip(k).all(|p| PARTICLES.contains(p))
     {
         let base = parts.get(..k).map(|b| b.join("-")).unwrap_or_default();
-        return known(d, &base) || (base.contains('-') && hyphenated(d, &base));
+        return known(d, &base) || (base.contains('-') && hyphenated(d, &base, opts));
     }
     match lp.as_slice() {
         // `кое-кто`, `кой-какой`.
@@ -369,7 +381,7 @@ fn hyphenated(d: &AffixDict, w: &str) -> bool {
     let last = parts.len() - 1;
     parts.iter().enumerate().all(|(i, p)| {
         // An abbreviation part (`ИИ-консультант`, `SMS-рассылка`) or a known word.
-        if known(d, p) || (p.chars().all(|c| !c.is_lowercase()) && p.chars().count() <= ABBREVIATION_LETTERS) {
+        if known(d, p) || (opts.ignore_uppercase && p.chars().all(|c| !c.is_lowercase()) && p.chars().count() <= ABBREVIATION_LETTERS) {
             return true;
         }
         // A first part with a linking vowel: the stem (`северо` → `север`) or its adjective
@@ -496,5 +508,26 @@ mod tests {
         assert!(!is_correct("зкщфрусскоеслово"));
         crate::add_word("Зкщфрусскоеслово");
         assert!(is_correct("зкщфрусскоеслово"));
+    }
+
+    /// With Ignore words in UPPERCASE or Ignore words that contain numbers off, Russian checks
+    /// those words against the dictionary instead of accepting them.
+    #[test]
+    fn proofing_options_reach_the_russian_check() {
+        test_dict::install();
+        let lang = crate::ProofLang::Ru;
+        let defaults = crate::Options::default();
+        let check_caps = crate::Options { ignore_uppercase: false, ..defaults };
+        let check_digits = crate::Options { ignore_numbers: false, ..defaults };
+        assert!(crate::is_correct_in_with("ПРЕВЕТ", lang, &defaults), "short capitals are abbreviations by default");
+        assert!(!crate::is_correct_in_with("ПРЕВЕТ", lang, &check_caps));
+        assert!(crate::is_correct_in_with("ПРИВЕТ", lang, &check_caps));
+        assert!(crate::is_correct_in_with("ИИ-консультант", lang, &defaults));
+        assert!(!crate::is_correct_in_with("ИИ-консультант", lang, &check_caps), "a part in capitals is checked too");
+        assert!(crate::is_correct_in_with("превет2", lang, &defaults));
+        assert!(!crate::is_correct_in_with("превет2", lang, &check_digits));
+        assert!(!crate::is_correct_in_with("м²", lang, &check_digits), "a superscript is a number too");
+        assert!(crate::is_correct_in_with("2026", lang, &check_digits), "numbers alone stay correct");
+        assert!(is_correct("ПРЕВЕТ"), "direct checks keep the defaults");
     }
 }

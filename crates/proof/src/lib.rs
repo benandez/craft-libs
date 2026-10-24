@@ -778,8 +778,8 @@ pub fn is_correct_in_with(word: &str, lang: ProofLang, opts: &Options) -> bool {
         ProofLang::Hr => accepted_by_options(word, opts) || hr::is_correct_with_options(word, opts),
         ProofLang::Pt => accepted_by_options(word, opts) || pt::is_correct_with_options(word, opts),
         ProofLang::It => accepted_by_options(word, opts) || it::is_correct_with_options(word, opts),
-        ProofLang::Tr => accepted_by_options(word, opts) || tr::is_correct(word),
-        ProofLang::Ru => accepted_by_options(word, opts) || ru::is_correct(word),
+        ProofLang::Tr => accepted_by_options(word, opts) || tr::is_correct_with_options(word, opts),
+        ProofLang::Ru => accepted_by_options(word, opts) || ru::is_correct_with_options(word, opts),
         ProofLang::Es | ProofLang::EsMx | ProofLang::Es419 | ProofLang::EsUy => {
             accepted_by_options(word, opts) || es::is_correct_with_options(word, lang, opts)
         }
@@ -1075,6 +1075,7 @@ mod tests {
             ("pt_BR", pt::test_dict::AFF, pt::test_dict::DIC),
             ("it_IT", it::test_dict::AFF, it::test_dict::DIC),
             ("hr_HR", hr::test_dict::AFF, hr::test_dict::DIC),
+            ("tr_TR", tr::test_dict::AFF, tr::test_dict::DIC),
             ("ru_RU", ru::test_dict::AFF, ru::test_dict::DIC),
             ("cs_CZ", cs::test_dict::AFF, cs::test_dict::DIC),
             ("id_ID", id::test_dict::AFF, id::test_dict::DIC),
@@ -1094,9 +1095,9 @@ mod tests {
         let before = dictionary_generation();
         set_dictionaries_folder(Some(dir.clone()));
         assert!(dictionary_generation() > before, "cached checks are dropped");
-        // Turkish has no test dictionary to put in the folder; Russian, Czech, Indonesian and the Spanishes follow it.
+        // Turkish follows the four below; Russian, Czech, Indonesian and the Spanishes follow it.
         let found = installed_dictionaries();
-        assert_eq!(found.get(4).map(|(lang, _)| *lang), Some(ProofLang::Tr));
+        assert_eq!(found.get(4), Some(&(ProofLang::Tr, Some(dir.join("tr_TR.dic")))));
         assert_eq!(
             found[7..],
             [
