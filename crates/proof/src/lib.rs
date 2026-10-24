@@ -67,6 +67,7 @@ pub mod pl;
 pub mod pt;
 pub mod ru;
 mod slot;
+mod spelling;
 pub mod tr;
 pub mod vi;
 

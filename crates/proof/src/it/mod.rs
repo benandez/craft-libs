@@ -49,11 +49,6 @@ pub fn has_dictionary() -> bool {
     DICT.has_dictionary()
 }
 
-/// Is `c` a letter of the Latin script (the only one the Italian dictionary covers)?
-fn is_latin_letter(c: char) -> bool {
-    c.is_alphabetic() && (c < '\u{0250}' || ('\u{1E00}'..='\u{1EFF}').contains(&c))
-}
-
 /// Proclitics (and verb clippings) that elide before a vowel or `h`: the word after the
 /// apostrophe is what gets checked (`l'amico`, `un'idea`, `c'è`, `m'hai`, `dov'è`, `anch'io`).
 const PROCLITICS: &[&str] = &[
@@ -93,21 +88,9 @@ pub fn is_correct_with(d: &AffixDict, word: &str) -> bool {
 
 /// [`is_correct_with_options`] against a given dictionary.
 fn check(d: &AffixDict, word: &str, opts: &crate::Options) -> bool {
-    if d.is_empty() {
-        return true; // no Italian dictionary installed: no spelling marks
-    }
-    let w = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '’');
-    let w = w.trim_matches(['\'', '’']);
-    let n = w.chars().count();
-    if n <= 1 || (opts.ignore_numbers && w.chars().any(|c| c.is_ascii_digit())) || !w.chars().any(char::is_alphabetic) {
+    let Some(w) = crate::spelling::word_to_check(d, word, opts) else {
         return true;
-    }
-    if opts.ignore_uppercase && w.chars().all(|c| !c.is_lowercase()) && n <= 6 {
-        return true;
-    }
-    if !w.chars().any(is_latin_letter) {
-        return true; // other scripts: no dictionary
-    }
+    };
     let lower = w.to_lowercase();
     if TRUNCATIONS.contains(&lower.as_str()) || left_to_grammar(&lower) {
         return true;

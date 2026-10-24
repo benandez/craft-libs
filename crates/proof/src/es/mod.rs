@@ -77,11 +77,6 @@ pub fn has_dictionary(lang: ProofLang) -> bool {
     slot(lang).has_dictionary()
 }
 
-/// Is `c` a letter of the Latin script (the only one the Spanish dictionaries cover)?
-fn is_latin_letter(c: char) -> bool {
-    c.is_alphabetic() && (c < '\u{0250}' || ('\u{1E00}'..='\u{1EFF}').contains(&c))
-}
-
 /// Is `word` spelled correctly in `lang`'s Spanish? Numbers, single letters, short words in
 /// capitals (acronyms: `ONU`, `CDMX`), words with digits and words in other scripts are accepted,
 /// and so is every word when no dictionary is installed for the variety. Hyphenated compounds
@@ -105,21 +100,9 @@ pub fn is_correct_with(d: &AffixDict, word: &str, lang: ProofLang) -> bool {
 
 /// [`is_correct_with_options`] against a given dictionary.
 fn check(d: &AffixDict, word: &str, lang: ProofLang, opts: &crate::Options) -> bool {
-    if d.is_empty() {
-        return true; // no Spanish dictionary installed: no spelling marks
-    }
-    let w = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '’');
-    let w = w.trim_matches(['\'', '’']);
-    let n = w.chars().count();
-    if n <= 1 || (opts.ignore_numbers && w.chars().any(|c| c.is_ascii_digit())) || !w.chars().any(char::is_alphabetic) {
+    let Some(w) = crate::spelling::word_to_check(d, word, opts) else {
         return true;
-    }
-    if opts.ignore_uppercase && w.chars().all(|c| !c.is_lowercase()) && n <= 6 {
-        return true;
-    }
-    if !w.chars().any(is_latin_letter) {
-        return true; // other scripts: no dictionary
-    }
+    };
     if w.contains('-') {
         return known(d, w, lang) || w.split('-').all(|p| p.chars().count() <= 1 || known(d, p, lang));
     }
