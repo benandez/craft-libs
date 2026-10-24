@@ -16,16 +16,19 @@ mod suggest;
 pub(crate) mod test_dict;
 pub mod voseo;
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use crate::ProofLang;
 use crate::affix::AffixDict;
+use crate::slot::DictSlot;
 
 pub use suggest::suggest;
 
-/// The dictionary of each variety (Spain, Mexico, Latin America, Uruguay): `None` until first
-/// use, then the installed one (or an empty one).
-static DICTS: [RwLock<Option<Arc<AffixDict>>>; 4] = [const { RwLock::new(None) }; 4];
+/// The dictionary of each variety, found on first use (see [`DictSlot`]).
+static SPAIN_DICT: DictSlot<AffixDict> = DictSlot::new(SPAIN, "Spanish (Spain)");
+static MEXICO_DICT: DictSlot<AffixDict> = DictSlot::new(MEXICO, "Spanish (Mexico)");
+static LATIN_AMERICA_DICT: DictSlot<AffixDict> = DictSlot::new(LATIN_AMERICA, "Spanish (Latin America)");
+static URUGUAY_DICT: DictSlot<AffixDict> = DictSlot::new(URUGUAY, "Spanish (Uruguay)");
 
 /// File names of a Spanish Hunspell dictionary for Spain, most specific first (`es_ANY` is the
 /// generic one RLA-ES publishes).
@@ -40,79 +43,53 @@ const LATIN_AMERICA: &[&str] = &["es_419", "es-419", "es_ANY", "es", "es_US", "e
 /// or generic one.
 const URUGUAY: &[&str] = &["es_UY", "es-UY", "es_AR", "es-AR", "es_419", "es-419", "es_ANY", "es"];
 
-/// `lang`'s variety: its slot in [`DICTS`], its English name (for the log) and its dictionary's
-/// file names; Spain for any other language.
-fn variety(lang: ProofLang) -> (usize, &'static str, &'static [&'static str]) {
+/// `lang`'s variety's dictionary; Spain's for any other language.
+fn slot(lang: ProofLang) -> &'static DictSlot<AffixDict> {
     match lang {
-        ProofLang::EsMx => (1, "Spanish (Mexico)", MEXICO),
-        ProofLang::Es419 => (2, "Spanish (Latin America)", LATIN_AMERICA),
-        ProofLang::EsUy => (3, "Spanish (Uruguay)", URUGUAY),
-        _ => (0, "Spanish (Spain)", SPAIN),
+        ProofLang::EsMx => &MEXICO_DICT,
+        ProofLang::Es419 => &LATIN_AMERICA_DICT,
+        ProofLang::EsUy => &URUGUAY_DICT,
+        _ => &SPAIN_DICT,
     }
 }
 
 /// The Hunspell name each variety's dictionary is known by (`es_ES`, `es_MX`, `es_419`,
 /// `es_UY`): the first of its file names, used for the status-bar hint and load errors.
 pub fn dictionary_name(lang: ProofLang) -> &'static str {
-    variety(lang).2.first().copied().unwrap_or("es_ES")
+    slot(lang).name()
 }
 
 /// The Spanish dictionary of `lang`'s variety: the installed one (read on first use), one given
 /// with [`install_dictionary`], or an empty one when none is available (spelling is off then;
 /// see [`has_dictionary`]).
 pub fn dictionary(lang: ProofLang) -> Arc<AffixDict> {
-    let Some(slot) = DICTS.get(variety(lang).0) else { return Arc::new(AffixDict::default()) };
-    if let Some(d) = slot.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
-        return d.clone();
-    }
-    let loaded = Arc::new(load_installed(lang));
-    let mut slot = slot.write().unwrap_or_else(|e| e.into_inner());
-    // Another thread (or an install) may have filled it meanwhile: that one wins.
-    slot.get_or_insert(loaded).clone()
-}
-
-fn load_installed(lang: ProofLang) -> AffixDict {
-    let (_, name, files) = variety(lang);
-    let key = dictionary_name(lang);
-    let Some((aff, dic)) = crate::hunspell::find(files) else {
-        crate::hunspell::clear_load_error(key);
-        log::info!("{name} spelling: no Hunspell {key} dictionary installed");
-        return AffixDict::default();
-    };
-    crate::hunspell::note_load(key, &dic, crate::hunspell::load(&aff, &dic)).unwrap_or_else(|e| {
-        log::warn!("{name} spelling: {e}");
-        AffixDict::default()
-    })
+    slot(lang).get()
 }
 
 /// Use this dictionary for `lang`'s variety from now on (Hunspell `.aff` and `.dic` text,
 /// decoded to UTF-8), for example one the user picked. On error the current dictionary stays.
 pub fn install_dictionary(lang: ProofLang, aff: &str, dic: &str) -> Result<(), String> {
-    let d = AffixDict::from_hunspell(aff, dic, &[])?;
-    if let Some(slot) = DICTS.get(variety(lang).0) {
-        *slot.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(d));
-    }
-    Ok(())
+    slot(lang).install(aff, dic)
 }
 
 /// Forget every variety's loaded dictionary, so the next check looks for an installed one again
 /// (after [`crate::hunspell::set_dictionary_dir`] or a dictionary was installed).
 pub fn reload_dictionary() {
-    for slot in &DICTS {
-        *slot.write().unwrap_or_else(|e| e.into_inner()) = None;
+    for slot in [&SPAIN_DICT, &MEXICO_DICT, &LATIN_AMERICA_DICT, &URUGUAY_DICT] {
+        slot.reload();
     }
 }
 
 /// The `.dic` file of the Hunspell dictionary `lang`'s variety finds in the dictionaries folder
-/// or the system locations now (File › Options › Proofing shows it); `None` when there is none.
-/// A dictionary given with [`install_dictionary`] has no file and isn't reported.
+/// or the system locations now (File › Options › Proofing shows it); `None` when there is none,
+/// or when one given with [`install_dictionary`] is in use.
 pub fn installed_path(lang: ProofLang) -> Option<std::path::PathBuf> {
-    crate::hunspell::find(variety(lang).2).map(|(_, dic)| dic)
+    slot(lang).installed_path()
 }
 
 /// Is a dictionary available for `lang`'s variety (spelling is checked)?
 pub fn has_dictionary(lang: ProofLang) -> bool {
-    !dictionary(lang).is_empty()
+    slot(lang).has_dictionary()
 }
 
 /// Is `c` a letter of the Latin script (the only one the Spanish dictionaries cover)?
@@ -200,7 +177,7 @@ mod tests {
             std::fs::write(dir.join(format!("{name}.aff")), test_dict::AFF).unwrap();
             std::fs::write(dir.join(format!("{name}.dic")), test_dict::DIC).unwrap();
             for lang in VARIETIES {
-                let found = crate::hunspell::find_in(&dir, variety(lang).2);
+                let found = crate::hunspell::find_in(&dir, slot(lang).names());
                 assert_eq!(found.is_some(), found_by.contains(&lang), "{name}: {lang:?}");
                 if let Some((aff, dic)) = found {
                     assert!(is_correct_with(&crate::hunspell::load(&aff, &dic).unwrap(), "canción", lang));
@@ -215,7 +192,7 @@ mod tests {
             std::fs::write(dir.join(format!("{name}.dic")), test_dict::DIC).unwrap();
         }
         for (lang, name) in [(es, "es_ES"), (mx, "es_MX"), (la, "es_419"), (uy, "es_UY")] {
-            assert_eq!(crate::hunspell::find_in(&dir, variety(lang).2).map(|(_, dic)| dic), Some(dir.join(format!("{name}.dic"))));
+            assert_eq!(crate::hunspell::find_in(&dir, slot(lang).names()).map(|(_, dic)| dic), Some(dir.join(format!("{name}.dic"))));
             assert_eq!(dictionary_name(lang), name);
         }
         std::fs::remove_dir_all(dir).unwrap();

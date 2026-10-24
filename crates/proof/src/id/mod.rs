@@ -9,73 +9,53 @@ mod suggest;
 #[cfg(test)]
 pub(crate) mod test_dict;
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use crate::affix::AffixDict;
+use crate::slot::DictSlot;
 
 pub use suggest::suggest;
-
-/// The Indonesian dictionary: `None` until first use, then the installed one (or an empty one).
-static DICT: RwLock<Option<Arc<AffixDict>>> = RwLock::new(None);
 
 /// File names of an Indonesian Hunspell dictionary (`in` is the old ISO 639 code, still used by
 /// Java locales).
 const NAMES: &[&str] = &["id_ID", "id-ID", "id", "in_ID"];
 
-/// Clitics PUEBI joins with a hyphen to a capitalized word, an abbreviation or a number
-/// (`se-Indonesia`, `KTP-nya`, `Jakarta-lah`); they aren't dictionary words on their own.
-const CLITICS: &[&str] = &["se", "nya", "ku", "mu", "lah", "kah", "pun"];
+/// The Indonesian dictionary, found on first use (see [`DictSlot`]).
+static DICT: DictSlot<AffixDict> = DictSlot::new(NAMES, "Indonesian");
 
 /// The Indonesian dictionary: the installed Hunspell `id_ID` (read on first use), one given with
 /// [`install_dictionary`], or an empty one when none is available (Indonesian spelling is off
 /// then; see [`has_dictionary`]).
 pub fn dictionary() -> Arc<AffixDict> {
-    if let Some(d) = DICT.read().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
-        return d.clone();
-    }
-    let loaded = Arc::new(load_installed());
-    let mut slot = DICT.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Another thread (or an install) may have filled it meanwhile: that one wins.
-    slot.get_or_insert(loaded).clone()
-}
-
-fn load_installed() -> AffixDict {
-    let Some((aff, dic)) = crate::hunspell::find(NAMES) else {
-        crate::hunspell::clear_load_error(NAMES[0]);
-        log::info!("Indonesian spelling: no Hunspell id_ID dictionary installed");
-        return AffixDict::default();
-    };
-    crate::hunspell::note_load(NAMES[0], &dic, crate::hunspell::load(&aff, &dic)).unwrap_or_else(|e| {
-        log::warn!("Indonesian spelling: {e}");
-        AffixDict::default()
-    })
+    DICT.get()
 }
 
 /// Use this Indonesian dictionary from now on (Hunspell `.aff` and `.dic` text, decoded to
 /// UTF-8), for example one the user picked. On error the current dictionary stays.
 pub fn install_dictionary(aff: &str, dic: &str) -> Result<(), String> {
-    let d = AffixDict::from_hunspell(aff, dic, &[])?;
-    *DICT.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(d));
-    Ok(())
+    DICT.install(aff, dic)
 }
 
 /// Forget the loaded dictionary, so the next check looks for an installed one again (after
 /// [`crate::hunspell::set_dictionary_dir`] or a dictionary was installed).
 pub fn reload_dictionary() {
-    *DICT.write().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    DICT.reload();
 }
 
-/// The `.dic` file of the Hunspell `id_ID` dictionary found in the dictionaries folder or the
-/// system locations now (File › Options › Proofing shows it); `None` when there is none. A
-/// dictionary given with [`install_dictionary`] has no file and isn't reported.
+/// The `.dic` file of the installed Indonesian dictionary (File › Options › Proofing shows it);
+/// `None` when there is none, or when one given with [`install_dictionary`] is in use.
 pub fn installed_path() -> Option<std::path::PathBuf> {
-    crate::hunspell::find(NAMES).map(|(_, dic)| dic)
+    DICT.installed_path()
 }
 
 /// Is an Indonesian dictionary available (spelling is checked)?
 pub fn has_dictionary() -> bool {
-    !dictionary().is_empty()
+    DICT.has_dictionary()
 }
+
+/// Clitics PUEBI joins with a hyphen to a capitalized word, an abbreviation or a number
+/// (`se-Indonesia`, `KTP-nya`, `Jakarta-lah`); they aren't dictionary words on their own.
+const CLITICS: &[&str] = &["se", "nya", "ku", "mu", "lah", "kah", "pun"];
 
 /// Is `c` a letter of the Latin script (the only one the Indonesian dictionary covers)?
 fn is_latin_letter(c: char) -> bool {

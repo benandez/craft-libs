@@ -9,68 +9,47 @@ mod suggest;
 #[cfg(test)]
 pub(crate) mod test_dict;
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use crate::affix::AffixDict;
+use crate::slot::DictSlot;
 
 pub use suggest::suggest;
 
-/// The Croatian dictionary: `None` until first use, then the installed one (or an empty one).
-static DICT: RwLock<Option<Arc<AffixDict>>> = RwLock::new(None);
-
 /// File names of a Croatian Hunspell dictionary.
 const NAMES: &[&str] = &["hr_HR", "hr-HR", "hr"];
+
+/// The Croatian dictionary, found on first use (see [`DictSlot`]).
+static DICT: DictSlot<AffixDict> = DictSlot::new(NAMES, "Croatian");
 
 /// The Croatian dictionary: the installed Hunspell `hr_HR` (read on first use), one given with
 /// [`install_dictionary`], or an empty one when none is available (Croatian spelling is off
 /// then; see [`has_dictionary`]).
 pub fn dictionary() -> Arc<AffixDict> {
-    if let Some(d) = DICT.read().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
-        return d.clone();
-    }
-    let loaded = Arc::new(load_installed());
-    let mut slot = DICT.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Another thread (or an install) may have filled it meanwhile: that one wins.
-    slot.get_or_insert(loaded).clone()
-}
-
-fn load_installed() -> AffixDict {
-    let Some((aff, dic)) = crate::hunspell::find(NAMES) else {
-        crate::hunspell::clear_load_error(NAMES[0]);
-        log::info!("Croatian spelling: no Hunspell hr_HR dictionary installed");
-        return AffixDict::default();
-    };
-
-    crate::hunspell::note_load(NAMES[0], &dic, crate::hunspell::load(&aff, &dic)).unwrap_or_else(|e| {
-        log::warn!("Croatian spelling: {e}");
-        AffixDict::default()
-    })
+    DICT.get()
 }
 
 /// Use this Croatian dictionary from now on (Hunspell `.aff` and `.dic` text, decoded to
 /// UTF-8), for example one the user picked. On error the current dictionary stays.
 pub fn install_dictionary(aff: &str, dic: &str) -> Result<(), String> {
-    let d = AffixDict::from_hunspell(aff, dic, &[])?;
-    *DICT.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(d));
-    Ok(())
+    DICT.install(aff, dic)
 }
 
 /// Forget the loaded dictionary, so the next check looks for an installed one again (after
 /// [`crate::hunspell::set_dictionary_dir`] or a dictionary was installed).
 pub fn reload_dictionary() {
-    *DICT.write().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    DICT.reload();
 }
 
-/// The `.dic` file of the Hunspell `hr_HR` dictionary found in the dictionaries folder or the
-/// system locations now (File › Options › Proofing shows it, #1063); `None` when there is none.
-/// A dictionary given with [`install_dictionary`] has no file and isn't reported.
+/// The `.dic` file of the installed Croatian dictionary (File › Options › Proofing shows it);
+/// `None` when there is none, or when one given with [`install_dictionary`] is in use.
 pub fn installed_path() -> Option<std::path::PathBuf> {
-    crate::hunspell::find(NAMES).map(|(_, dic)| dic)
+    DICT.installed_path()
 }
 
 /// Is a Croatian dictionary available (spelling is checked)?
 pub fn has_dictionary() -> bool {
-    !dictionary().is_empty()
+    DICT.has_dictionary()
 }
 
 /// Is `c` a letter of the Latin script (the only one the Croatian dictionary covers)?

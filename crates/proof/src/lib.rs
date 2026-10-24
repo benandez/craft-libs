@@ -65,6 +65,7 @@ pub mod patterns;
 pub mod pl;
 pub mod pt;
 pub mod ru;
+mod slot;
 pub mod tr;
 pub mod vi;
 
@@ -1095,36 +1096,35 @@ mod tests {
         let before = dictionary_generation();
         set_dictionaries_folder(Some(dir.clone()));
         assert!(dictionary_generation() > before, "cached checks are dropped");
-        // Turkish follows the four below; Russian, Czech, Indonesian and the Spanishes follow it.
+        // Every language is listed, Russian and Czech too (#3226: they were once missing, so
+        // neither showed up in File › Options › Proofing). A language reports the folder's file,
+        // or none while a dictionary given with install_dictionary() is in use (#3252 review);
+        // the languages' own tests install theirs concurrently, so an exact path would race them.
+        // The folder is searched first whatever is in use.
         let found = installed_dictionaries();
-        assert_eq!(found.get(4), Some(&(ProofLang::Tr, Some(dir.join("tr_TR.dic")))));
+        let names = ["pl_PL", "pt_BR", "it_IT", "hr_HR", "tr_TR", "ru_RU", "cs_CZ", "id_ID", "es_ES", "es_MX", "es_419", "es_UY"];
         assert_eq!(
-            found[7..],
+            found.iter().map(|(lang, _)| *lang).collect::<Vec<_>>(),
             [
-                (ProofLang::Id, Some(dir.join("id_ID.dic"))),
-                (ProofLang::Es, Some(dir.join("es_ES.dic"))),
-                (ProofLang::EsMx, Some(dir.join("es_MX.dic"))),
-                (ProofLang::Es419, Some(dir.join("es_419.dic"))),
-                (ProofLang::EsUy, Some(dir.join("es_UY.dic"))),
+                ProofLang::Pl,
+                ProofLang::Pt,
+                ProofLang::It,
+                ProofLang::Hr,
+                ProofLang::Tr,
+                ProofLang::Ru,
+                ProofLang::Cs,
+                ProofLang::Id,
+                ProofLang::Es,
+                ProofLang::EsMx,
+                ProofLang::Es419,
+                ProofLang::EsUy
             ]
         );
-        assert_eq!(
-            found[..4],
-            [
-                (ProofLang::Pl, Some(dir.join("pl_PL.dic"))),
-                (ProofLang::Pt, Some(dir.join("pt_BR.dic"))),
-                (ProofLang::It, Some(dir.join("it_IT.dic"))),
-                (ProofLang::Hr, Some(dir.join("hr_HR.dic"))),
-            ]
-        );
-        // #3226: Russian and Czech were missing from installed_dictionaries() entirely (no
-        // installed_path() in either module), so neither ever showed up in File › Options ›
-        // Proofing, installed or not. Their languages, not their exact path, is what belongs
-        // here: unlike the four above, installed_path() for Russian and Czech also reflects
-        // whether install_dictionary() gave one directly (#3252 review), which ru's and cs's own
-        // test modules do, concurrently, in tests of their own — asserting an exact path here
-        // would race them for no reason this test needs to care about.
-        assert_eq!(found[5..7].iter().map(|(lang, _)| *lang).collect::<Vec<_>>(), [ProofLang::Ru, ProofLang::Cs], "{found:?}");
+        for ((lang, path), name) in found.iter().zip(names) {
+            let file = dir.join(format!("{name}.dic"));
+            assert!(path.is_none() || path.as_ref() == Some(&file), "{lang:?}: {path:?}");
+            assert_eq!(hunspell::find(&[name]).map(|(_, dic)| dic), Some(file), "{lang:?}");
+        }
         assert!(is_correct_in("chrząszcz", ProofLang::Pl) && !is_correct_in("chrzonszcz", ProofLang::Pl));
         assert!(is_correct_in("tenés", ProofLang::EsUy) && !is_correct_in("prueva", ProofLang::EsUy));
         assert!(is_correct_in("дом", ProofLang::Ru) && !is_correct_in("дум", ProofLang::Ru));
