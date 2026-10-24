@@ -130,14 +130,14 @@ fn dictionary_key(w: &str) -> String {
 
 /// Add a word to the user dictionary ("Add to Dictionary"). It applies to every language.
 pub fn add_word(w: &str) {
-    if user_words().write().unwrap_or_else(|e| e.into_inner()).insert(dictionary_key(w)) {
+    if user_words().write().unwrap_or_else(std::sync::PoisonError::into_inner).insert(dictionary_key(w)) {
         DICTIONARY_GENERATION.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 /// Take a word out of the user dictionary (File › Options › Proofing). Returns whether it was there.
 pub fn remove_word(w: &str) -> bool {
-    let removed = user_words().write().unwrap_or_else(|e| e.into_inner()).remove(&dictionary_key(w));
+    let removed = user_words().write().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&dictionary_key(w));
     if removed {
         DICTIONARY_GENERATION.fetch_add(1, Ordering::Relaxed);
     }
@@ -152,7 +152,7 @@ fn ignored_words() -> &'static RwLock<HashSet<String>> {
 /// Ignore a word everywhere until the app closes ("Ignore All"). Unlike [`add_word`] it isn't
 /// part of the user dictionary: it is never listed, saved or loaded, as in Word.
 pub fn ignore_word(w: &str) {
-    if ignored_words().write().unwrap_or_else(|e| e.into_inner()).insert(dictionary_key(w)) {
+    if ignored_words().write().unwrap_or_else(std::sync::PoisonError::into_inner).insert(dictionary_key(w)) {
         DICTIONARY_GENERATION.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -220,13 +220,13 @@ pub fn dictionary_generation() -> u64 {
 /// the entries are kept ([`dictionary_key`]).
 pub(crate) fn in_user_dictionary(lower: &str) -> bool {
     let key = composed(lower);
-    user_words().read().unwrap_or_else(|e| e.into_inner()).contains(&*key)
-        || ignored_words().read().unwrap_or_else(|e| e.into_inner()).contains(&*key)
+    user_words().read().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&*key)
+        || ignored_words().read().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&*key)
 }
 
 /// Words in the user dictionary.
 pub fn user_dictionary() -> Vec<String> {
-    let mut v: Vec<String> = user_words().read().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect();
+    let mut v: Vec<String> = user_words().read().unwrap_or_else(std::sync::PoisonError::into_inner).iter().cloned().collect();
     v.sort();
     v
 }
@@ -274,7 +274,7 @@ fn read_dictionary_file(path: &std::path::Path) -> Vec<String> {
 /// never a panic and never an error that stops startup. Returns the words added.
 pub fn load_user_dictionary(path: &std::path::Path) -> Vec<String> {
     let words = read_dictionary_file(path);
-    let mut set = user_words().write().unwrap_or_else(|e| e.into_inner());
+    let mut set = user_words().write().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut added = Vec::new();
     for w in words {
         if set.len() >= MAX_CUSTOM_WORDS {
@@ -300,7 +300,7 @@ pub fn save_user_dictionary(path: &std::path::Path, removed: &[String]) -> std::
     let removed: HashSet<String> = removed.iter().map(|w| dictionary_key(w)).collect();
     let on_disk = read_dictionary_file(path);
     {
-        let mut set = user_words().write().unwrap_or_else(|e| e.into_inner());
+        let mut set = user_words().write().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut changed = false;
         for w in on_disk {
             if set.len() >= MAX_CUSTOM_WORDS {
@@ -342,7 +342,7 @@ const COMMON: &str = "a an the and or but if of to in on at by for with from as 
 const EXTRA_EN: &str = include_str!("../../../assets/spelling/en-extra.txt");
 
 fn extra_words() -> &'static HashSet<&'static str> {
-    static E: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    static E: OnceLock<HashSet<&str>> = OnceLock::new();
     E.get_or_init(|| EXTRA_EN.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect())
 }
 
@@ -943,7 +943,7 @@ fn grammar_en(text: &str, capital_first: bool) -> Vec<Issue> {
         if gap == " "
             && (w0 == "an" || w0 == "An")
             && w1.chars().next().is_some_and(|c| c.is_alphabetic() && !"aeiouAEIOUhH".contains(c))
-            && !w1.chars().all(|c| c.is_uppercase())
+            && !w1.chars().all(char::is_uppercase)
         {
             v.push(Issue {
                 start: *a0,
