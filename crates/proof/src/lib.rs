@@ -774,17 +774,17 @@ pub fn is_correct_in_with(word: &str, lang: ProofLang, opts: &Options) -> bool {
     let word = &*composed(word);
     match lang {
         ProofLang::En | ProofLang::EnGb | ProofLang::EnCa => is_correct_english(word, lang, opts),
-        ProofLang::Pl => accepted_by_options(word, opts) || pl::is_correct(word),
-        ProofLang::Hr => accepted_by_options(word, opts) || hr::is_correct(word),
-        ProofLang::Pt => accepted_by_options(word, opts) || pt::is_correct(word),
-        ProofLang::It => accepted_by_options(word, opts) || it::is_correct(word),
+        ProofLang::Pl => accepted_by_options(word, opts) || pl::is_correct_with_options(word, opts),
+        ProofLang::Hr => accepted_by_options(word, opts) || hr::is_correct_with_options(word, opts),
+        ProofLang::Pt => accepted_by_options(word, opts) || pt::is_correct_with_options(word, opts),
+        ProofLang::It => accepted_by_options(word, opts) || it::is_correct_with_options(word, opts),
         ProofLang::Tr => accepted_by_options(word, opts) || tr::is_correct(word),
         ProofLang::Ru => accepted_by_options(word, opts) || ru::is_correct(word),
-        ProofLang::Cs => accepted_by_options(word, opts) || cs::is_correct(word),
-        ProofLang::Id => accepted_by_options(word, opts) || id::is_correct(word),
         ProofLang::Es | ProofLang::EsMx | ProofLang::Es419 | ProofLang::EsUy => {
             accepted_by_options(word, opts) || es::is_correct_with_options(word, lang, opts)
         }
+        ProofLang::Cs => accepted_by_options(word, opts) || cs::is_correct_with_options(word, opts),
+        ProofLang::Id => accepted_by_options(word, opts) || id::is_correct_with_options(word, opts),
         ProofLang::Bg | ProofLang::De | ProofLang::Other => true,
     }
 }
