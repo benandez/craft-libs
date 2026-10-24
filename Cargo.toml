@@ -33,6 +33,7 @@ craft-media = { path = "crates/media" }
 craft-prepress = { path = "crates/prepress" }
 craft-print = { path = "crates/print" }
 craft-quit = { path = "crates/quit" }
+craft-regex = { path = "crates/regex" }
 craft-settings = { path = "crates/settings" }
 craft-ui = { path = "crates/ui" }
 craft-window = { path = "crates/window" }

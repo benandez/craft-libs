@@ -1,0 +1,18 @@
+[package]
+name = "craft-regex"
+description = "A pure-Rust PCRE2-style backtracking regex engine with backreferences, lookaround and recursion, bounded by a caller-owned search budget."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+regex-syntax = "0.8"
+
+[dev-dependencies]
+proptest = { workspace = true }
+regex-automata = "0.4"
+
+[lints]
+workspace = true
