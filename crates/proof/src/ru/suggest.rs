@@ -161,11 +161,11 @@ impl Collector<'_> {
         let mut words = Vec::new();
         let mut cost = cost;
         for part in cand.split(' ') {
-            if self.d.contains(part) {
+            if self.d.contains_suggestible(part) {
                 words.push(part.to_string());
             } else {
                 let c = capitalize(part);
-                if !self.d.contains(&c) {
+                if !self.d.contains_suggestible(&c) {
                     return;
                 }
                 words.push(c);
@@ -178,6 +178,9 @@ impl Collector<'_> {
 
     /// Keep a suggestion known to be correct.
     fn keep(&mut self, text: String, cost: u32) {
+        if !text.split(' ').all(|part| self.d.can_suggest(part)) {
+            return;
+        }
         self.seq += 1;
         let seq = self.seq;
         let e = self.found.entry(text).or_insert((cost, seq));
@@ -456,6 +459,22 @@ mod tests {
     fn has(word: &str, want: &str) {
         let s = suggest(word, 8);
         assert!(s.iter().any(|x| x == want), "{word} → {s:?}, want {want}");
+    }
+
+    /// A word the dictionary marks NOSUGGEST (a vulgarism, a rare form) is correct but never
+    /// offered, in any round or letter case. Russian's MAP and REP tables are its own, so the
+    /// shared Latin-script check doesn't reach it.
+    #[test]
+    fn nosuggest_words_are_never_offered() {
+        let offered = |aff: &str, input: &str| {
+            let d = AffixDict::from_hunspell(aff, "2\nпривет/N\nпредмет/N\n", &[]).unwrap();
+            suggest_in(&d, input, 16)
+        };
+        assert!(offered("SET UTF-8\n", "превет").contains(&"привет".into()), "offered without the flag declared");
+        for input in ["превет", "ПРЕВЕТ", "предмот", "приветт", "привте", "привет"] {
+            let s = offered("SET UTF-8\nNOSUGGEST N\n", input);
+            assert!(!s.iter().any(|w| w.to_lowercase().contains("привет") || w.to_lowercase().contains("предмет")), "{input}: {s:?}");
+        }
     }
 
     #[test]
