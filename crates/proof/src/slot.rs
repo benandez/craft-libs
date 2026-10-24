@@ -67,6 +67,8 @@ impl<D: Dictionary> Slot for DictSlot<D> {
 struct State<D> {
     dict: Option<Arc<D>>,
     in_memory: bool,
+    /// Counts reloads, so a load that started before one is not kept.
+    reloads: u64,
 }
 
 /// One language's dictionary.
@@ -80,7 +82,7 @@ pub(crate) struct DictSlot<D> {
 
 impl<D: Dictionary> DictSlot<D> {
     pub(crate) const fn new(names: &'static [&'static str], english: &'static str) -> Self {
-        DictSlot { names, english, state: RwLock::new(State { dict: None, in_memory: false }) }
+        DictSlot { names, english, state: RwLock::new(State { dict: None, in_memory: false, reloads: 0 }) }
     }
 
     fn read(&self) -> RwLockReadGuard<'_, State<D>> {
@@ -105,12 +107,25 @@ impl<D: Dictionary> DictSlot<D> {
     /// The dictionary: the installed one (read on first use), one given with [`Self::install`], or
     /// an empty one when none is available (the language's spelling is off then).
     pub(crate) fn get(&self) -> Arc<D> {
-        if let Some(d) = self.read().dict.as_ref() {
-            return d.clone();
+        let reloads = {
+            let s = self.read();
+            if let Some(d) = s.dict.as_ref() {
+                return d.clone();
+            }
+            s.reloads
+        };
+        self.keep(reloads, Arc::new(self.load_installed()))
+    }
+
+    /// Keep a dictionary loaded after `reloads` reloads. If the folder was reloaded since, the
+    /// load may have read the old folder: it serves this one check and the next one loads again.
+    fn keep(&self, reloads: u64, loaded: Arc<D>) -> Arc<D> {
+        let mut s = self.write();
+        if s.reloads != reloads {
+            return s.dict.clone().unwrap_or(loaded);
         }
-        let loaded = Arc::new(self.load_installed());
         // Another thread (or an install) may have filled it meanwhile: that one wins.
-        self.write().dict.get_or_insert(loaded).clone()
+        s.dict.get_or_insert(loaded).clone()
     }
 
     fn load_installed(&self) -> D {
@@ -142,6 +157,7 @@ impl<D: Dictionary> DictSlot<D> {
         let mut slot = self.write();
         slot.dict = None;
         slot.in_memory = false;
+        slot.reloads = slot.reloads.wrapping_add(1);
     }
 
     /// The `.dic` file of the installed dictionary, searching the dictionaries folder and the
@@ -177,5 +193,18 @@ mod tests {
         SLOT.reload();
         assert!(!SLOT.has_dictionary(), "reloaded from disk, where there is none");
         assert_eq!(SLOT.name(), "zz_SLOT_TEST");
+    }
+
+    /// A load that started before a dictionaries-folder change is not kept after its reload.
+    #[test]
+    fn a_load_from_before_a_reload_is_not_kept() {
+        let slot: DictSlot<AffixDict> = DictSlot::new(&["zz_SLOT_RELOAD_TEST"], "Test");
+        let before = slot.read().reloads;
+        slot.reload();
+        let _ = slot.keep(before, Arc::new(AffixDict::default()));
+        assert!(slot.read().dict.is_none(), "the next check loads from the new folder");
+        let now = slot.read().reloads;
+        let _ = slot.keep(now, Arc::new(AffixDict::default()));
+        assert!(slot.read().dict.is_some(), "a load since the reload is kept");
     }
 }
