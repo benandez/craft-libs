@@ -102,7 +102,8 @@ struct Collector<'a> {
     d: &'a AffixDict,
     /// The word, lower case.
     input: String,
-    tested: HashSet<String>,
+    /// Candidate → the cheapest cost it was offered at (rounds don't run in rising cost).
+    tested: HashMap<String, u32>,
     /// Suggestion → (cost, order found).
     found: HashMap<String, (u32, usize)>,
     seq: usize,
@@ -112,8 +113,15 @@ impl Collector<'_> {
     /// Check a lower-case candidate (a word, or two separated by a space) and keep it if every
     /// word is in the dictionary, as written or capitalized (names).
     fn offer(&mut self, cand: &str, cost: u32) {
-        if cand.is_empty() || cand == self.input || !self.tested.insert(cand.to_string()) {
+        if cand.is_empty() || cand == self.input {
             return;
+        }
+        match self.tested.get_mut(cand) {
+            Some(prev) if *prev <= cost => return,
+            Some(prev) => *prev = cost,
+            None => {
+                self.tested.insert(cand.to_string(), cost);
+            }
         }
         let mut words = Vec::new();
         let mut cost = cost;
@@ -270,7 +278,7 @@ pub(crate) fn suggest_in(d: &AffixDict, word: &str, max: usize, t: &Tuning) -> V
     let case = casing(word);
     let input = word.to_lowercase();
     let chars: Vec<char> = input.chars().collect();
-    let mut col = Collector { d, input: input.clone(), tested: HashSet::new(), found: HashMap::new(), seq: 0 };
+    let mut col = Collector { d, input: input.clone(), tested: HashMap::new(), found: HashMap::new(), seq: 0 };
     // 1. Letter case.
     if d.contains(&input) && word != input {
         col.keep(input.clone(), COST_CASE);
@@ -461,6 +469,18 @@ mod tests {
         let suggestions = suggest_in(&d, "počítačz", 8, &Tuning::DEFAULT);
         assert_eq!(suggestions.first().map(String::as_str), Some("počítač"), "{suggestions:?}");
         assert!(suggestions.contains(&"počítač z".into()), "{suggestions:?}");
+    }
+
+    /// A candidate offered again at a lower cost (a REP confusion after a MAP diacritic drop)
+    /// ranks at the lower one.
+    #[test]
+    fn a_cheaper_later_offer_wins() {
+        let d = AffixDict::from_hunspell("", "1\ncafe\n", &[]).unwrap();
+        let mut col = Collector { d: &d, input: "cafè".into(), tested: HashMap::new(), found: HashMap::new(), seq: 0 };
+        col.offer("cafe", COST_DROP_DIACRITIC);
+        col.offer("cafe", COST_REP);
+        col.offer("cafe", COST_SCAN);
+        assert_eq!(col.found.get("cafe").map(|e| e.0), Some(COST_REP));
     }
 
     #[test]
