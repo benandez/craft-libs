@@ -1059,7 +1059,9 @@ mod tests {
 
     use super::*;
 
-    /// Held by tests that swap or rely on the shared Spanish dictionary, so a folder reset can't land mid-test.
+    /// Held by tests that swap or rely on the shared Spanish dictionary, so a folder reset can't land
+    /// mid-test, and by those that save the whole user dictionary and load it back, which would
+    /// bring back a word another test just removed.
     static DICTIONARY_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// #1063: the dictionaries folder is searched before the system locations; the dictionaries
@@ -1579,6 +1581,7 @@ mod tests {
     /// #40: the user dictionary survives a save and a fresh load.
     #[test]
     fn user_dictionary_persists_through_a_file() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = std::env::temp_dir().join(format!("wc-dict-{}-{}", std::process::id(), "persist"));
         let _ = std::fs::remove_dir_all(&dir);
         // The folder is created on the first save.
