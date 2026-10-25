@@ -877,8 +877,8 @@ impl AffixDict {
 
     /// Read data written by [`AffixDict::to_bytes`].
     pub fn from_bytes(data: &[u8]) -> Result<AffixDict, String> {
-        let raw =
-            miniz_oxide::inflate::decompress_to_vec_with_limit(data, 64 << 20).map_err(|e| format!("affix dictionary: inflate failed: {e:?}"))?;
+        let raw = miniz_oxide::inflate::decompress_to_vec_with_limit(data, 64 << 20)
+            .map_err(|e| format!("affix dictionary: inflate failed: {:?}", e.status))?;
         let words_at = raw.windows(7).position(|w| w == b"\nWORDS\n").ok_or("affix dictionary: no WORDS section")?;
         let head = std::str::from_utf8(raw.get(..words_at).unwrap_or_default()).map_err(|_| "affix dictionary: bad utf-8 in the rules")?;
         let mut lines = head.lines();
