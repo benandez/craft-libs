@@ -78,7 +78,7 @@ impl Dictionary {
 
     /// Deserialize data written by [`Dictionary::to_bytes`].
     pub fn from_bytes(data: &[u8]) -> Result<Dictionary, String> {
-        let raw = miniz_oxide::inflate::decompress_to_vec(data).map_err(|e| format!("hyphenation dictionary: inflate failed: {e:?}"))?;
+        let raw = miniz_oxide::inflate::decompress_to_vec(data).map_err(|e| format!("hyphenation dictionary: inflate failed: {:?}", e.status))?;
         let body = raw.strip_prefix(MAGIC).ok_or("hyphenation dictionary: bad header")?;
         let mut d = Dictionary { words: String::with_capacity(body.len()), offs: vec![0], masks: Vec::new() };
         let mut cur: Vec<u8> = Vec::new();
