@@ -219,16 +219,18 @@ fn decode_high(bytes: &[u8], high: &str) -> String {
 /// one the original Portuguese VERO uses, ISO 8859-9 the one older Turkish dictionaries use, KOI8-R
 /// and Windows-1251 the ones older Russian dictionaries use).
 ///
-/// Under a UTF-8 `SET` without `FLAG UTF-8`, flags are still single bytes, as in Hunspell: the
-/// Hungarian dictionary writes its affix flags and flag aliases as bytes above 0x7F that aren't
-/// UTF-8. Those fields are read byte by byte (each byte becomes U+0000..U+00FF, one flag per
-/// byte); the words, affixes and conditions around them are UTF-8.
+/// Under a UTF-8 `SET` with single-byte flags (no `FLAG` line, or `FLAG DEFAULT`), flags are bytes,
+/// as in Hunspell: the Hungarian dictionary writes its affix flags and flag aliases as bytes above
+/// 0x7F that aren't UTF-8. Those fields are read byte by byte (each byte becomes U+0000..U+00FF,
+/// one flag per byte); the words, affixes and conditions around them are UTF-8. With any other
+/// `FLAG` (`UTF-8`, `num`, `long`) flags are text and the whole file is UTF-8: `SFX 1234` keeps
+/// its number (the Turkish dictionary's `FLAG num`).
 pub fn decode(aff: &[u8], dic: &[u8]) -> Result<(String, String), String> {
     let (set, flag) = directives(aff);
     let set = set.unwrap_or_else(|| "UTF-8".into());
     match set.as_str() {
         "UTF-8" | "UTF8" => {
-            if matches!(flag.as_deref(), Some("UTF-8" | "UTF8")) {
+            if flag.as_deref().is_some_and(|f| f != "DEFAULT") {
                 let text = |b: &[u8], what: &str| String::from_utf8(b.to_vec()).map_err(|e| format!("{what}: not UTF-8: {e}"));
                 return Ok((text(aff, ".aff")?, text(dic, ".dic")?));
             }
@@ -538,6 +540,24 @@ mod tests {
         let dict = crate::affix::AffixDict::from_hunspell(&a, &d, &[]).unwrap();
         assert!(dict.check("kert") && dict.check("kertok"));
         assert!(dict.check("NATO") && !dict.check("Nato"), "KEEPCASE é reaches NATO/é");
+    }
+
+    #[test]
+    fn numeric_and_long_flags_stay_text() {
+        // `FLAG num` (the Turkish dictionary) and `FLAG long`: no byte-wise flag reading, so a
+        // number with a non-ASCII rule or comment keeps every digit.
+        let aff = "SET UTF-8\nFLAG num\nFORBIDDENWORD 6000 # tiltott ő\nSFX 1234 Y 1\nSFX 1234 0 ları .\n";
+        let (a, d) = decode(aff.as_bytes(), "1\nkitap/1234\n".as_bytes()).unwrap();
+        assert_eq!(a, aff);
+        assert_eq!(d, "1\nkitap/1234\n");
+        let tr = crate::tr::dict::TrDict::from_hunspell(&a, &d).unwrap();
+        assert!(tr.contains("kitapları") && tr.contains("kitap"));
+        let long = "SET UTF-8\nFLAG long\nSFX Aa Y 1\nSFX Aa 0 ős .\n";
+        assert_eq!(decode(long.as_bytes(), "1\nkő/Aa\n".as_bytes()).unwrap().0, long);
+        assert!(decode(b"SET UTF-8\nFLAG num\n", b"1\nh\xe1z/1\n").is_err(), "the .dic must be UTF-8");
+        // `FLAG DEFAULT` is the single-byte default.
+        let (_, d) = decode(b"SET UTF-8\nFLAG default\n", b"1\nkert/\xe9\n").unwrap();
+        assert_eq!(d, "1\nkert/\u{e9}\n");
     }
 
     #[test]
