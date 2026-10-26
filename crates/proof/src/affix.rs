@@ -447,7 +447,8 @@ fn parse_aff(aff: &str) -> Result<Rules, String> {
             "AF" => {
                 if !af_header {
                     af_header = true;
-                    r.aliases_on = at(1).parse::<usize>().is_ok();
+                    // A count below 1 rejects the table too: flags stay literal (`AF 0`).
+                    r.aliases_on = at(1).parse::<usize>().is_ok_and(|n| n > 0);
                 } else if r.aliases_on {
                     r.aliases.push(at(1).to_string());
                 }
@@ -1625,6 +1626,9 @@ pub(crate) mod tests {
         // A table without its count line is rejected: no alias applies.
         let broken = AffixDict::from_hunspell("SET UTF-8\nAF B\nAF C\nSFX B Y 1\nSFX B 0 s .\n", "2\nlab/1\nfal/2\n", &[]).unwrap();
         assert!(broken.check("lab") && !broken.check("labs") && !broken.check("fals"));
+        // `AF 0` is rejected the same way: `lab/B` keeps its literal flag.
+        let zero = AffixDict::from_hunspell("SET UTF-8\nAF 0\nSFX B Y 1\nSFX B 0 s .\n", "1\nlab/B\n", &[]).unwrap();
+        assert!(zero.check("lab") && zero.check("labs"));
         // An undefined alias in a continuation class leaves the rule in force, without it.
         let cont = AffixDict::from_hunspell("SET UTF-8\nAF 1\nAF a\nSFX a Y 1\nSFX a 0 ok/7 .\n", "1\nhaz/1\n", &[]).unwrap();
         assert!(cont.check("haz") && cont.check("hazok"));
