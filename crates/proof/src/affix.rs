@@ -382,7 +382,9 @@ fn split_fields(line: &str) -> impl Iterator<Item = &str> {
 fn one_flag(arg: &str, dir: &str, n: usize) -> Result<char, String> {
     let mut it = arg.chars().filter(|&c| c != EMOJI_SELECTOR);
     match (it.next(), it.next()) {
-        (Some(c), None) if !c.is_whitespace() => Ok(c),
+        // Only the field separators of `split_fields` can't be a flag: a flag byte read as
+        // U+0085 or U+00A0 is one.
+        (Some(c), None) if !matches!(c, ' ' | '\t') => Ok(c),
         _ => Err(format!("line {}: {dir} needs one flag character", n + 1)),
     }
 }
@@ -1739,6 +1741,13 @@ pub(crate) mod tests {
         assert!(d.contains("koty") && d.contains("kotem"));
         let back = AffixDict::from_bytes(&d.to_bytes()).unwrap();
         assert!(back.contains("koty") && back.contains("kotem"));
+        // The same bytes as one-flag directives, as Hunspell reads them.
+        let aff = "SET UTF-8\nFORBIDDENWORD \u{a0}\nKEEPCASE \u{85}\nSFX a Y 1\nSFX a 0 s .\n";
+        let d = AffixDict::from_hunspell(aff, "3\nkot/a\nrossz/\u{a0}\npH/\u{85}\n", &[]).unwrap();
+        for dict in [&d, &AffixDict::from_bytes(&d.to_bytes()).unwrap()] {
+            assert!(dict.check("kots") && !dict.check("rossz"));
+            assert!(dict.check("pH") && !dict.check("PH"));
+        }
     }
 
     #[test]
