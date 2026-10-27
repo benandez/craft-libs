@@ -28,8 +28,7 @@ pub struct TrDict {
 
 impl crate::slot::Dictionary for TrDict {
     fn load(aff: &std::path::Path, dic: &std::path::Path) -> Result<Self, String> {
-        let read = |p: &std::path::Path| std::fs::read_to_string(p).map_err(|e| e.to_string());
-        TrDict::from_hunspell(&read(aff)?, &read(dic)?)
+        super::load(aff, dic)
     }
 
     fn parse(aff: &str, dic: &str) -> Result<Self, String> {
@@ -102,7 +101,8 @@ impl TrDict {
 
     /// Check if word is correct (stem or affixed).
     pub fn contains(&self, word: &str) -> bool {
-        if self.is_empty() || word.is_empty() {
+        // Longer input is never a dictionary word, and isn't scanned (#3625).
+        if self.is_empty() || word.is_empty() || word.len() > crate::affix::MAX_WORD_BYTES {
             return false;
         }
 

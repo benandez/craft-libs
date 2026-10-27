@@ -37,6 +37,13 @@ pub fn dictionary() -> Arc<TrDict> {
     DICT.get()
 }
 
+/// Read a Turkish Hunspell pair from disk: size-capped and decoded per the `.aff`'s `SET` line,
+/// like the other languages' dictionaries (#3661).
+pub(crate) fn load(aff: &std::path::Path, dic: &std::path::Path) -> Result<TrDict, String> {
+    let (aff_text, dic_text) = crate::hunspell::decode(&crate::hunspell::read_capped(aff)?, &crate::hunspell::read_capped(dic)?)?;
+    TrDict::from_hunspell(&aff_text, &dic_text)
+}
+
 /// Use this Turkish dictionary from now on (Hunspell `.aff` and `.dic` text). On error the
 /// current dictionary stays.
 pub fn install_dictionary(aff: &str, dic: &str) -> Result<(), String> {
