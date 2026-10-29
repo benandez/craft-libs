@@ -279,104 +279,13 @@ pub(crate) fn suggest_in(d: &AffixDict, word: &str, max: usize, t: &Tuning) -> V
     let input = word.to_lowercase();
     let chars: Vec<char> = input.chars().collect();
     let mut col = Collector { d, input: input.clone(), tested: HashMap::new(), found: HashMap::new(), seq: 0 };
-    // 1. Letter case.
-    if d.contains(&input) && word != input {
-        col.keep(input.clone(), COST_CASE);
-    } else if d.contains(&capitalize(&input)) && word != capitalize(&input) {
-        col.keep(capitalize(&input), COST_CASE);
-    }
-    // 2. Accents and other MAP slips.
+    add_case(&mut col, word, &input);
     let map = groups(d, t);
-    let alts: Vec<Vec<char>> = chars.iter().map(|&c| alternatives(c, &map)).collect();
-    let mut variants = Vec::new();
-    map_variants(&chars, &alts, t, 0, 0, &mut Vec::with_capacity(n), &mut variants);
-    variants.sort_by_key(|v| v.1);
-    for (v, cost) in &variants {
-        col.offer(v, *cost);
-    }
-    // 3. Common confusions.
-    let rep = d.rep().iter().map(|(from, to)| (from.as_str(), to.as_str())).chain(t.rep.iter().copied());
-    for (from, to) in rep {
-        if from.is_empty() {
-            continue;
-        }
-        for (i, _) in input.match_indices(from) {
-            if let (Some(a), Some(b)) = (input.get(..i), input.get(i + from.len()..)) {
-                col.offer(&format!("{a}{to}{b}"), t.rep_cost);
-            }
-        }
-    }
-    // 4. A missing space; both halves must be dictionary words.
-    for (i, _) in input.char_indices().skip(1) {
-        let (Some(a), Some(b)) = (input.get(..i), input.get(i..)) else { continue };
-        if let Some(cost) = split_cost(&t.split, a, b) {
-            col.offer(&format!("{a} {b}"), cost);
-        }
-    }
-    // 5. Keyboard neighbours from the dictionary's KEY rows.
-    for row in d.key().split('|').take(32) {
-        let keys: Vec<char> = row.chars().take(128).collect();
-        for pair in keys.windows(2) {
-            let [a, b] = pair else { continue };
-            for (i, &c) in chars.iter().enumerate() {
-                let replacement = if c == *a {
-                    Some(*b)
-                } else if c == *b {
-                    Some(*a)
-                } else {
-                    None
-                };
-                if let Some(replacement) = replacement {
-                    let mut v = chars.clone();
-                    if let Some(x) = v.get_mut(i) {
-                        *x = replacement;
-                    }
-                    col.offer(&v.iter().collect::<String>(), COST_KEY);
-                }
-            }
-        }
-    }
-    // One typo, with the TRY letters (the language's when the dictionary has none), bounded and
-    // each once, in their order: a TRY line lists the commonest letters first, so equal-cost
-    // candidates come out in that order.
-    let try_chars = if d.try_chars().is_empty() { t.alphabet } else { d.try_chars() };
-    let mut letters: Vec<char> = Vec::new();
-    for c in try_chars.chars().filter(|c| c.is_lowercase()).take(128) {
-        if !letters.contains(&c) {
-            letters.push(c);
-        }
-    }
-    let s = |v: &[char]| v.iter().collect::<String>();
-    for i in 0..n.saturating_sub(1) {
-        if chars.get(i) != chars.get(i + 1) {
-            let mut v = chars.clone();
-            v.swap(i, i + 1);
-            col.offer(&s(&v), COST_SWAP);
-        }
-    }
-    for i in 0..n {
-        let mut v = chars.clone();
-        v.remove(i);
-        col.offer(&s(&v), COST_DROP_OR_ADD);
-    }
-    for i in 0..=n {
-        for &c in &letters {
-            let mut v = chars.clone();
-            v.insert(i, c);
-            col.offer(&s(&v), COST_DROP_OR_ADD);
-        }
-    }
-    for i in 0..n {
-        for &c in &letters {
-            if chars.get(i) != Some(&c) {
-                let mut v = chars.clone();
-                if let Some(x) = v.get_mut(i) {
-                    *x = c;
-                }
-                col.offer(&s(&v), (t.mistype_cost)(&chars, i, c));
-            }
-        }
-    }
+    add_map_slips(&mut col, &chars, &map, t);
+    add_confusions(&mut col, &input, t);
+    add_splits(&mut col, &input, &t.split);
+    add_key_neighbours(&mut col, &chars);
+    add_typos(&mut col, &chars, t);
     // 6. Further off: scan the stems that start like the word.
     if col.count_within(COST_MISTYPE) < max {
         scan(&mut col, &chars, &map);
@@ -401,6 +310,123 @@ pub(crate) fn suggest_in(d: &AffixDict, word: &str, max: usize, t: &Tuning) -> V
         }
     }
     out
+}
+
+/// Round 1: letter case.
+fn add_case(col: &mut Collector, word: &str, input: &str) {
+    if col.d.contains(input) && word != input {
+        col.keep(input.to_string(), COST_CASE);
+    } else if col.d.contains(&capitalize(input)) && word != capitalize(input) {
+        col.keep(capitalize(input), COST_CASE);
+    }
+}
+
+/// Round 2: accents and other MAP slips.
+fn add_map_slips(col: &mut Collector, chars: &[char], map: &[Vec<char>], t: &Tuning) {
+    let alts: Vec<Vec<char>> = chars.iter().map(|&c| alternatives(c, map)).collect();
+    let mut variants = Vec::new();
+    map_variants(chars, &alts, t, 0, 0, &mut Vec::with_capacity(chars.len()), &mut variants);
+    variants.sort_by_key(|v| v.1);
+    for (v, cost) in &variants {
+        col.offer(v, *cost);
+    }
+}
+
+/// Round 3: common confusions.
+fn add_confusions(col: &mut Collector, input: &str, t: &Tuning) {
+    let rep = col.d.rep().iter().map(|(from, to)| (from.as_str(), to.as_str())).chain(t.rep.iter().copied());
+    for (from, to) in rep {
+        if from.is_empty() {
+            continue;
+        }
+        for (i, _) in input.match_indices(from) {
+            if let (Some(a), Some(b)) = (input.get(..i), input.get(i + from.len()..)) {
+                col.offer(&format!("{a}{to}{b}"), t.rep_cost);
+            }
+        }
+    }
+}
+
+/// Round 4: a missing space; both halves must be dictionary words.
+fn add_splits(col: &mut Collector, input: &str, split: &Split) {
+    for (i, _) in input.char_indices().skip(1) {
+        let (Some(a), Some(b)) = (input.get(..i), input.get(i..)) else { continue };
+        if let Some(cost) = split_cost(split, a, b) {
+            col.offer(&format!("{a} {b}"), cost);
+        }
+    }
+}
+
+/// Round 5: keyboard neighbours from the dictionary's KEY rows.
+fn add_key_neighbours(col: &mut Collector, chars: &[char]) {
+    for row in col.d.key().split('|').take(32) {
+        let keys: Vec<char> = row.chars().take(128).collect();
+        for pair in keys.windows(2) {
+            let [a, b] = pair else { continue };
+            for (i, &c) in chars.iter().enumerate() {
+                let replacement = if c == *a {
+                    Some(*b)
+                } else if c == *b {
+                    Some(*a)
+                } else {
+                    None
+                };
+                if let Some(replacement) = replacement {
+                    let mut v = chars.to_vec();
+                    if let Some(x) = v.get_mut(i) {
+                        *x = replacement;
+                    }
+                    col.offer(&v.iter().collect::<String>(), COST_KEY);
+                }
+            }
+        }
+    }
+}
+
+/// Round 5, second half: one typo, with the TRY letters (the language's when the dictionary has
+/// none), bounded and each once, in their order: a TRY line lists the commonest letters first, so
+/// equal-cost candidates come out in that order.
+fn add_typos(col: &mut Collector, chars: &[char], t: &Tuning) {
+    let d = col.d;
+    let n = chars.len();
+    let try_chars = if d.try_chars().is_empty() { t.alphabet } else { d.try_chars() };
+    let mut letters: Vec<char> = Vec::new();
+    for c in try_chars.chars().filter(|c| c.is_lowercase()).take(128) {
+        if !letters.contains(&c) {
+            letters.push(c);
+        }
+    }
+    let s = |v: &[char]| v.iter().collect::<String>();
+    for i in 0..n.saturating_sub(1) {
+        if chars.get(i) != chars.get(i + 1) {
+            let mut v = chars.to_vec();
+            v.swap(i, i + 1);
+            col.offer(&s(&v), COST_SWAP);
+        }
+    }
+    for i in 0..n {
+        let mut v = chars.to_vec();
+        v.remove(i);
+        col.offer(&s(&v), COST_DROP_OR_ADD);
+    }
+    for i in 0..=n {
+        for &c in &letters {
+            let mut v = chars.to_vec();
+            v.insert(i, c);
+            col.offer(&s(&v), COST_DROP_OR_ADD);
+        }
+    }
+    for i in 0..n {
+        for &c in &letters {
+            if chars.get(i) != Some(&c) {
+                let mut v = chars.to_vec();
+                if let Some(x) = v.get_mut(i) {
+                    *x = c;
+                }
+                col.offer(&s(&v), (t.mistype_cost)(chars, i, c));
+            }
+        }
+    }
 }
 
 /// Round 6: rank the stems starting with the word's first letter (or a MAP relative of it, either
