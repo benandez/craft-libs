@@ -13,18 +13,19 @@
 //!
 //! Supported: one-character flags (any Unicode character — `FLAG UTF-8`), two-character flags
 //! (`FLAG long`) and numeric flags (`FLAG num`: comma-separated numbers from 0 to 65,535), up to
-//! 65,536 distinct flags in all ([`FlagMode`]), flag aliases (`AF`: a number standing for a set of flags), `PFX`/`SFX` with strip, append and
-//! condition (`.`, letters, `[abc]`, `[^abc]`), cross products, continuation classes on suffixes
-//! (at most two suffixes in a row, as in Hunspell), `FORBIDDENWORD`, `NOSUGGEST`, `KEEPCASE` (the
-//! stem is a word only in its own letter case), input conversion (`ICONV`: ligatures such as `ﬁ`
-//! read as `fi`) and ignored characters (`IGNORE`), and the suggestion tables `TRY`, `KEY`, `MAP`
-//! and `REP`. Compounds by `COMPOUNDRULE` (patterns of flags with `*` and `?`, as SCOWL's English
+//! 65,536 distinct flags in all ([`FlagMode`]), flag aliases (`AF`: a number standing for a set of
+//! flags), `PFX`/`SFX` with strip, append and condition (`.`, letters, `[abc]`, `[^abc]`), cross
+//! products, continuation classes on suffixes (at most two suffixes in a row, as in Hunspell),
+//! `FORBIDDENWORD`, `NOSUGGEST`, `KEEPCASE` (the stem is a word only in its own letter case),
+//! `NEEDAFFIX`, `CIRCUMFIX`, `FULLSTRIP`, input conversion (`ICONV`: ligatures such as `ﬁ` read as
+//! `fi`) and ignored characters (`IGNORE`), and the suggestion tables `TRY`, `KEY`, `MAP` and `REP`.
+//! Compounds by `COMPOUNDRULE` (patterns of flags with `*` and `?`, as SCOWL's English
 //! dictionaries use for ordinals: `21st`, `112th`; with long or numeric flags each flag is written
 //! in parentheses, `(aa)*(bb)`), with `ONLYINCOMPOUND` and `COMPOUNDMIN`; the parts of such a
 //! compound are stems, without affixes, as in Hunspell.
 //! Morphological data (`AM` aliases, the fields after a stem) is skipped. Rejected: flag-based
-//! compounding (`COMPOUNDFLAG`, `COMPOUNDBEGIN`…), `NEEDAFFIX` and the other directives that
-//! change which words are correct.
+//! compounding (`COMPOUNDFLAG`, `COMPOUNDBEGIN`…) and the other directives that change which
+//! words are correct.
 //!
 //! Each distinct flag gets a dense `u16` id; a stem's flags and a rule's continuation classes are
 //! a sorted set of ids, interned once in a flat table, so membership is a binary search in a few
@@ -68,7 +69,6 @@ const MAX_DISTINCT_FLAGS: usize = 1 << 16;
 /// Directives that change which words are correct in ways this engine doesn't implement.
 const UNSUPPORTED: &[&str] = &[
     "CHECKSHARPS",
-    "CIRCUMFIX",
     "COMPLEXPREFIXES",
     "COMPOUNDBEGIN",
     "COMPOUNDEND",
@@ -77,8 +77,6 @@ const UNSUPPORTED: &[&str] = &[
     "COMPOUNDLAST",
     "COMPOUNDMIDDLE",
     "COMPOUNDPERMITFLAG",
-    "FULLSTRIP",
-    "NEEDAFFIX",
     "OCONV",
     "PSEUDOROOT",
 ];
@@ -291,6 +289,14 @@ pub struct AffixDict {
     rep: Vec<(String, String)>,
     /// The `KEEPCASE` flag: such stems are words only in their own letter case.
     keepcase: Option<u16>,
+    /// `NEEDAFFIX`: a stem carrying it is not a word on its own, and a rule carrying it in its
+    /// continuation classes gives forms that need one more affix.
+    need_affix: Option<u16>,
+    /// `CIRCUMFIX`: a prefix or suffix carrying it in its continuation classes is only valid
+    /// together with a suffix or prefix that carries it too.
+    circumfix: Option<u16>,
+    /// `FULLSTRIP`: an affix may strip (and so replace) a whole stem.
+    full_strip: bool,
     /// `ICONV`: input conversions applied before a lookup, `(from, to)`.
     iconv: Vec<(String, String)>,
     /// `IGNORE`: characters removed from input words (and from the stems and appended texts).
@@ -379,6 +385,9 @@ struct Rules {
     substandard: Option<FlagKey>,
     /// The `KEEPCASE` flag.
     keepcase: Option<FlagKey>,
+    need_affix: Option<FlagKey>,
+    circumfix: Option<FlagKey>,
+    full_strip: bool,
     iconv: Vec<(String, String)>,
     ignore: Vec<char>,
     /// `COMPOUNDRULE` patterns, as written (`n*1t`); read in the `FLAG` mode by
@@ -621,9 +630,10 @@ impl FlagMode {
 }
 
 /// Stem flags that rule a lookup out: `FORBIDDENWORD` always, and per lookup `NOSUGGEST` and
-/// `SUBSTANDARD` (suggestions) or `KEEPCASE` (case variants of a word).
+/// `SUBSTANDARD` (suggestions), `KEEPCASE` (case variants of a word) or `NEEDAFFIX` (a stem on
+/// its own).
 #[derive(Clone, Copy, Debug, Default)]
-struct Excluded([Option<u16>; 4]);
+struct Excluded([Option<u16>; 5]);
 
 impl Excluded {
     /// Does the flag set `set` carry an excluded flag?
@@ -756,6 +766,9 @@ fn parse_aff(aff: &str, english: bool) -> Result<Rules, String> {
                 let min = at(1).parse::<usize>().map_err(|_| format!("line {}: COMPOUNDMIN needs a number", n + 1))?;
                 r.compound_min = Some(min.clamp(1, MAX_COMPOUND_BYTES));
             }
+            "NEEDAFFIX" => r.need_affix = Some(r.one_flag(at(1)).map_err(|e| format!("line {}: {dir} needs one flag: {e}", n + 1))?),
+            "CIRCUMFIX" => r.circumfix = Some(r.one_flag(at(1)).map_err(|e| format!("line {}: {dir} needs one flag: {e}", n + 1))?),
+            "FULLSTRIP" => r.full_strip = true,
             "FLAG" => r.set_mode(at(1)).map_err(|e| format!("line {}: {e}", n + 1))?,
             "FORBIDDENWORD" => r.forbidden = Some(r.one_flag(at(1)).map_err(|e| format!("line {}: {dir} needs one flag: {e}", n + 1))?),
             "NOSUGGEST" => r.no_suggest = Some(r.one_flag(at(1)).map_err(|e| format!("line {}: {dir} needs one flag: {e}", n + 1))?),
@@ -939,7 +952,10 @@ impl AffixDict {
         let mut distinct: FxMap<FlagKey, u16> = FxMap::default();
         let all = rules.prefixes.iter().chain(&rules.suffixes).map(|r| r.0);
         let all = all.chain(pfx_cont.iter().chain(&sfx_cont).flatten().copied()).chain(stem_keys.iter().copied());
-        for k in all.chain(rules.forbidden).chain(rules.no_suggest).chain(rules.substandard).chain(rules.keepcase).chain(rules.only_in_compound) {
+        // NEEDAFFIX and CIRCUMFIX flags may only ever appear in rules' continuation classes.
+        let directives =
+            [rules.forbidden, rules.no_suggest, rules.substandard, rules.keepcase, rules.only_in_compound, rules.need_affix, rules.circumfix];
+        for k in all.chain(directives.into_iter().flatten()) {
             distinct.entry(k).or_insert(0);
             if distinct.len() > MAX_DISTINCT_FLAGS {
                 return Err(format!("more than {MAX_DISTINCT_FLAGS} distinct flags"));
@@ -964,6 +980,9 @@ impl AffixDict {
             no_suggest: rules.no_suggest.and_then(id_of),
             substandard: rules.substandard.and_then(id_of),
             keepcase: rules.keepcase.and_then(id_of),
+            need_affix: rules.need_affix.and_then(id_of),
+            circumfix: rules.circumfix.and_then(id_of),
+            full_strip: rules.full_strip,
             flag_mode: mode,
             iconv: rules.iconv,
             ignore: rules.ignore.into_boxed_slice(),
@@ -1254,6 +1273,11 @@ impl AffixDict {
         None
     }
 
+    /// Do the continuation classes of `r` hold `flag`?
+    fn cont_holds(&self, r: &Rule, flag: Option<u16>) -> bool {
+        flag.is_some_and(|f| has(self.set(r.cont), f))
+    }
+
     /// Can a derived form carry `flag` (does some rule's continuation classes hold it)?
     fn is_cont_flag(&self, flag: u16) -> bool {
         self.cont_flag.get(usize::from(flag)).copied().unwrap_or(false)
@@ -1280,7 +1304,7 @@ impl AffixDict {
         // total size of the distinct sets it meets, not rules × set size.
         let probe = FlagProbe::new(flags);
         let mut seen: FxMap<u32, bool> = FxMap::default();
-        let cuts = std::iter::once(w.len()).chain(w.char_indices().rev().map(|(i, _)| i).filter(|&i| i > 0));
+        let cuts = std::iter::once(w.len()).chain(w.char_indices().rev().map(|(i, _)| i).filter(|&i| i > 0 || self.full_strip));
         for b in cuts.take(self.max_sfx_chars + 1) {
             let (Some(base), Some(add)) = (w.get(..b), w.get(b..)) else { continue };
             let Some(groups) = self.sfx_index.get(add) else { continue };
@@ -1291,7 +1315,7 @@ impl AffixDict {
                 inner.clear();
                 for r in g.cont_rules.iter().filter_map(|&i| self.suffixes.get(i as usize)) {
                     let meets = *seen.entry(r.cont).or_insert_with(|| probe.meets(self.set(r.cont)));
-                    if meets && r.cond_matches(&root, true) {
+                    if meets && !self.cont_holds(r, self.circumfix) && r.cond_matches(&root, true) {
                         inner.push(r.flag);
                     }
                 }
@@ -1353,13 +1377,14 @@ impl AffixDict {
         if w.is_empty() || w.len() > MAX_WORD_BYTES {
             return false;
         }
-        if self.stem_flags_except(w, excluded).is_some() || self.suffixed(w, None, excluded) {
+        // A stem that needs an affix is no word on its own.
+        if self.stem_flags_except(w, excluded.and(self.need_affix)).is_some() || self.suffixed(w, None, false, excluded) {
             return true;
         }
         let mut root = String::with_capacity(w.len() + 8);
         for r in &self.prefixes {
             let Some(rest) = w.strip_prefix(&*r.add) else { continue };
-            if rest.is_empty() {
+            if rest.is_empty() && !self.full_strip {
                 continue;
             }
             root.clear();
@@ -1368,13 +1393,18 @@ impl AffixDict {
             if !r.cond_matches(&root, false) {
                 continue;
             }
-            if self.stem_flags_except(&root, excluded).is_some_and(|f| has(f, r.flag)) {
-                return true;
+            // A circumfix prefix works only with its suffix, and one that needs another affix
+            // only with a suffix too.
+            let circ = self.cont_holds(r, self.circumfix);
+            if !circ && !self.cont_holds(r, self.need_affix) {
+                if self.stem_flags_except(&root, excluded).is_some_and(|f| has(f, r.flag)) {
+                    return true;
+                }
+                if self.is_cont_flag(r.flag) && self.form_has_flag(&root, &[r.flag], INNER_CHAIN, excluded) {
+                    return true;
+                }
             }
-            if self.is_cont_flag(r.flag) && self.form_has_flag(&root, &[r.flag], INNER_CHAIN, excluded) {
-                return true;
-            }
-            if r.cross && self.suffixed(&root, Some(r.flag), excluded) {
+            if r.cross && self.suffixed(&root, Some(r.flag), circ, excluded) {
                 return true;
             }
         }
@@ -1417,13 +1447,16 @@ impl AffixDict {
     }
 
     /// Is `w` a stem with one suffix? With `need` set (a prefix was taken off), the stem must
-    /// carry that flag too and the suffix must allow cross products.
-    fn suffixed(&self, w: &str, need: Option<u16>, excluded: Excluded) -> bool {
+    /// carry that flag too and the suffix must allow cross products. `circ` says whether that
+    /// prefix is a circumfix one: the suffix must be one too, and otherwise must not be.
+    fn suffixed(&self, w: &str, need: Option<u16>, circ: bool, excluded: Excluded) -> bool {
+        // Fits the suffix rule `r`: circumfix alike, and not in need of another affix unless a prefix is there.
+        let fits = |r: &Rule| self.cont_holds(r, self.circumfix) == circ && (need.is_some() || !self.cont_holds(r, self.need_affix));
         let mut root = String::with_capacity(w.len() + 8);
         let mut flags: Vec<u16> = Vec::new();
         // Each split point from the end: the appended string is `w[b..]`, at most the longest
         // suffix, and something must stay before it.
-        let cuts = std::iter::once(w.len()).chain(w.char_indices().rev().map(|(i, _)| i).filter(|&i| i > 0));
+        let cuts = std::iter::once(w.len()).chain(w.char_indices().rev().map(|(i, _)| i).filter(|&i| i > 0 || self.full_strip));
         for b in cuts.take(self.max_sfx_chars + 1) {
             let (Some(base), Some(add)) = (w.get(..b), w.get(b..)) else { continue };
             let Some(groups) = self.sfx_index.get(add) else { continue };
@@ -1436,7 +1469,7 @@ impl AffixDict {
                 // when a cross product is being checked).
                 if let Some(f) = self.stem_flags_except(&root, excluded)
                     && need.is_none_or(|n| has(f, n))
-                    && rules().any(|r| has(f, r.flag) && (need.is_none() || r.cross) && r.cond_matches(&root, true))
+                    && rules().any(|r| has(f, r.flag) && (need.is_none() || r.cross) && fits(r) && r.cond_matches(&root, true))
                 {
                     return true;
                 }
@@ -1447,7 +1480,7 @@ impl AffixDict {
                 if need.is_none() && self.has_cont {
                     flags.clear();
                     // Only a flag some continuation class holds can come from another rule.
-                    flags.extend(rules().filter(|r| self.is_cont_flag(r.flag) && r.cond_matches(&root, true)).map(|r| r.flag));
+                    flags.extend(rules().filter(|r| self.is_cont_flag(r.flag) && fits(r) && r.cond_matches(&root, true)).map(|r| r.flag));
                     flags.sort_unstable();
                     flags.dedup();
                     if !flags.is_empty() && self.form_has_flag(&root, &flags, INNER_CHAIN, excluded) {
@@ -1500,8 +1533,12 @@ impl AffixDict {
     /// cost millions of strings (#3613).
     pub fn forms(&self, stem: &str) -> Vec<String> {
         let Some(f) = self.stem_flags(stem) else { return Vec::new() };
-        let mut out = vec![stem.to_string()];
-        let mut cross_sfx = Vec::new();
+        let mut out = Vec::new();
+        if !self.need_affix.is_some_and(|n| has(f, n)) {
+            out.push(stem.to_string());
+        }
+        // Suffix forms a prefix may be added to, with whether they are circumfix ones.
+        let mut cross_sfx: Vec<(String, bool)> = Vec::new();
         // Suffix forms queued with the continuation classes they carry, for chained expansion;
         // each (form, classes) pair is expanded once.
         let mut chain: Vec<(String, u32)> = Vec::new();
@@ -1512,14 +1549,21 @@ impl AffixDict {
                 continue;
             }
             let Some(base) = stem.strip_suffix(&*r.strip) else { continue };
+            if base.is_empty() && !self.full_strip {
+                continue;
+            }
             let form = format!("{base}{}", r.add);
+            let circ = self.cont_holds(r, self.circumfix);
             if r.cross {
-                cross_sfx.push(form.clone());
+                cross_sfx.push((form.clone(), circ));
             }
             if r.cont != 0 && queued.insert((form.clone(), r.cont)) {
                 chain.push((form.clone(), r.cont));
             }
-            out.push(form);
+            // A circumfix suffix or one that needs another affix is no word on its own.
+            if !circ && !self.cont_holds(r, self.need_affix) {
+                out.push(form);
+            }
             if out.len() >= MAX_FORMS {
                 return out;
             }
@@ -1557,9 +1601,15 @@ impl AffixDict {
                 continue;
             }
             let Some(rest) = stem.strip_prefix(&*r.strip) else { continue };
-            out.push(format!("{}{rest}", r.add));
+            if rest.is_empty() && !self.full_strip {
+                continue;
+            }
+            let circ = self.cont_holds(r, self.circumfix);
+            if !circ && !self.cont_holds(r, self.need_affix) {
+                out.push(format!("{}{rest}", r.add));
+            }
             if r.cross {
-                for s in &cross_sfx {
+                for (s, _) in cross_sfx.iter().filter(|(_, c)| *c == circ) {
                     work += 1;
                     if out.len() >= MAX_FORMS || work > MAX_FORMS_WORK {
                         return out;
@@ -1654,9 +1704,17 @@ impl AffixDict {
             self.flags.iter().any(|&id| self.set(id).contains(&flag))
                 || self.prefixes.iter().chain(&self.suffixes).any(|r| r.flag == flag || self.set(r.cont).contains(&flag))
         };
-        for (directive, flag) in
-            [("FORBIDDENWORD", self.forbidden), ("NOSUGGEST", self.no_suggest), ("SUBSTANDARD", self.substandard), ("KEEPCASE", self.keepcase)]
-        {
+        if self.full_strip {
+            out.push_str("FULLSTRIP\n");
+        }
+        for (directive, flag) in [
+            ("FORBIDDENWORD", self.forbidden),
+            ("NOSUGGEST", self.no_suggest),
+            ("SUBSTANDARD", self.substandard),
+            ("KEEPCASE", self.keepcase),
+            ("NEEDAFFIX", self.need_affix),
+            ("CIRCUMFIX", self.circumfix),
+        ] {
             if let Some(flag) = flag.filter(|&f| self.flag_mode != FlagMode::Char || used(f)) {
                 out.push_str(directive);
                 out.push(' ');
@@ -1754,14 +1812,17 @@ impl AffixDict {
                 "FLAG" => rules.set_mode(at(1)).map_err(|e| format!("affix dictionary: {e}"))?,
                 "TRY" => rules.try_chars = cap_try(at(1)),
                 "KEY" => rules.key = at(1).to_string(),
-                directive @ ("FORBIDDENWORD" | "NOSUGGEST" | "SUBSTANDARD" | "KEEPCASE" | "ONLYINCOMPOUND") => {
+                "FULLSTRIP" => rules.full_strip = true,
+                directive @ ("FORBIDDENWORD" | "NOSUGGEST" | "SUBSTANDARD" | "KEEPCASE" | "ONLYINCOMPOUND" | "NEEDAFFIX" | "CIRCUMFIX") => {
                     let c = rules.one_flag(at(1)).map_err(|e| format!("affix dictionary: bad {directive} in `{line}`: {e}"))?;
                     match directive {
                         "FORBIDDENWORD" => rules.forbidden = Some(c),
                         "NOSUGGEST" => rules.no_suggest = Some(c),
                         "SUBSTANDARD" => rules.substandard = Some(c),
+                        "KEEPCASE" => rules.keepcase = Some(c),
                         "ONLYINCOMPOUND" => rules.only_in_compound = Some(c),
-                        _ => rules.keepcase = Some(c),
+                        "NEEDAFFIX" => rules.need_affix = Some(c),
+                        _ => rules.circumfix = Some(c),
                     }
                 }
                 "ICONV" if f.len() == 3 => rules.iconv.push((at(1).to_string(), at(2).to_string())),
@@ -2480,9 +2541,7 @@ pub(crate) mod tests {
         assert!(d.check("1st") && d.check("11th") && d.check("111th") && !d.check("11st"), "ordinals by COMPOUNDRULE");
         assert!(!d.check("housed") && !d.check("hous"));
         // The directives that change which words are right are still refused.
-        for dir in ["NEEDAFFIX", "CIRCUMFIX", "PSEUDOROOT", "FULLSTRIP"] {
-            assert!(AffixDict::from_hunspell_english(&format!("{dir} X\n"), dic, &[]).is_err(), "{dir}");
-        }
+        assert!(AffixDict::from_hunspell_english("PSEUDOROOT X\n", dic, &[]).is_err(), "PSEUDOROOT");
     }
 
     /// The English path reads `ONLYINCOMPOUND` in the dictionary's FLAG mode too.
@@ -2951,5 +3010,66 @@ x/12
                 }
             }
         }
+    }
+    /// `FULLSTRIP` lets an affix replace a whole stem; without it a stem must outlive its strip.
+    #[test]
+    fn fullstrip_allows_an_affix_to_replace_the_whole_stem() {
+        let aff = "SET UTF-8\nSFX A Y 1\nSFX A ab x .\nPFX B Y 1\nPFX B ab y .\n";
+        let dic = "1\nab/AB\n";
+        let without = AffixDict::from_hunspell(aff, dic, &[]).unwrap();
+        for w in ["ab", "x", "y"] {
+            assert_eq!(without.contains(w), w == "ab", "{w} without FULLSTRIP");
+        }
+        let with = AffixDict::from_hunspell(&format!("FULLSTRIP\n{aff}"), dic, &[]).unwrap();
+        for w in ["ab", "x", "y"] {
+            assert!(with.contains(w), "{w} with FULLSTRIP");
+        }
+        assert!(with.forms("ab").iter().all(|f| with.contains(f)));
+        assert!(!without.forms("ab").iter().any(|f| f == "x" || f == "y"));
+        let back = AffixDict::from_bytes(&with.to_bytes().unwrap()).unwrap();
+        assert!(back.contains("x") && back.contains("y"));
+    }
+
+    /// `NEEDAFFIX`: a stem or a suffix form that needs another affix is not a word without one.
+    #[test]
+    fn needaffix_stems_and_forms_need_one_more_affix() {
+        let aff = "SET UTF-8\nNEEDAFFIX N\nSFX A Y 1\nSFX A 0 s .\nSFX B Y 1\nSFX B 0 x/AN .\nPFX P Y 1\nPFX P 0 re .\n";
+        let d = AffixDict::from_hunspell(aff, "3\nfoo/NA\nbar/AB\nbaz/NP\n", &[]).unwrap();
+        for w in ["foos", "bar", "bars", "barxs", "rebaz"] {
+            assert!(d.contains(w), "{w}");
+        }
+        assert!(!d.contains("foo"), "a stem that needs an affix");
+        assert!(!d.contains("baz"), "a stem that needs an affix");
+        // `barx` carries NEEDAFFIX through its continuation class: it needs `s` after it.
+        assert!(!d.contains("barx"), "a form that needs another affix");
+        for stem in d.stems().map(str::to_string).collect::<Vec<_>>() {
+            for f in d.forms(&stem) {
+                assert!(d.contains(&f), "{stem} → {f}");
+            }
+        }
+        assert!(!d.forms("foo").iter().any(|f| f == "foo") && d.forms("foo").iter().any(|f| f == "foos"));
+        let back = AffixDict::from_bytes(&d.to_bytes().unwrap()).unwrap();
+        assert!(!back.contains("foo") && back.contains("foos"));
+    }
+
+    /// `CIRCUMFIX`: a circumfix prefix and suffix only work as a pair.
+    #[test]
+    fn circumfix_prefix_and_suffix_only_work_together() {
+        let aff = "SET UTF-8\nCIRCUMFIX c\nPFX P Y 1\nPFX P 0 ne/c .\nSFX S Y 1\nSFX S 0 y/c .\nSFX T Y 1\nSFX T 0 z .\n";
+        let d = AffixDict::from_hunspell(aff, "1\nstrom/PST\n", &[]).unwrap();
+        for w in ["strom", "stromz", "nestromy"] {
+            assert!(d.contains(w), "{w}");
+        }
+        for w in ["stromy", "nestrom", "nestromz"] {
+            assert!(!d.contains(w), "{w}");
+        }
+        for f in d.forms("strom") {
+            assert!(d.contains(&f), "strom → {f}");
+        }
+        let mut forms = d.forms("strom");
+        forms.sort();
+        assert_eq!(forms, ["nestromy", "strom", "stromz"]);
+        let back = AffixDict::from_bytes(&d.to_bytes().unwrap()).unwrap();
+        assert!(back.contains("nestromy") && !back.contains("stromy") && !back.contains("nestrom"));
     }
 }
