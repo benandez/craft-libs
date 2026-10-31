@@ -1611,16 +1611,12 @@ impl AffixDict {
             }
         }
         for r in &self.prefixes {
-            if !has(f, r.flag) || !r.cond_matches(stem, false) {
-                continue;
-            }
-            let Some(rest) = stem.strip_prefix(&*r.strip) else { continue };
-            if rest.is_empty() && !self.full_strip {
+            if !has(f, r.flag) {
                 continue;
             }
             let circ = self.cont_holds(r, self.circumfix);
             if !circ && !self.cont_holds(r, self.need_affix) {
-                out.extend(non_empty(format!("{}{rest}", r.add)));
+                out.extend(self.prefixed(r, stem));
             }
             if r.cross {
                 // Every suffix form looked at counts against the work budget, matching or not.
@@ -1632,9 +1628,7 @@ impl AffixDict {
                     if *s_circ != circ {
                         continue;
                     }
-                    if let Some(rest) = s.strip_prefix(&*r.strip) {
-                        out.extend(non_empty(format!("{}{rest}", r.add)));
-                    }
+                    out.extend(self.prefixed(r, s));
                 }
             }
             if out.len() >= MAX_FORMS {
@@ -1642,6 +1636,17 @@ impl AffixDict {
             }
         }
         out
+    }
+
+    /// `root` with the prefix rule `r` added, when the checker takes it back off: the rule's
+    /// condition holds for `root` (the stem, or a suffix form in a cross product), and something
+    /// stays after the strip unless `FULLSTRIP`.
+    fn prefixed(&self, r: &Rule, root: &str) -> Option<String> {
+        let rest = root.strip_prefix(&*r.strip)?;
+        if (rest.is_empty() && !self.full_strip) || !r.cond_matches(root, false) {
+            return None;
+        }
+        non_empty(format!("{}{rest}", r.add))
     }
 
     /// The suffix rules carrying any flag of the set `set`, in rule order.
@@ -3160,10 +3165,27 @@ x/12
         forms.sort();
         assert_eq!(forms, ["x", "y"]);
         assert!(d.contains("y") && !d.contains(""));
-        let aff = "SET UTF-8\nFULLSTRIP\nSFX A Y 1\nSFX A x 0 .\nPFX P Y 1\nPFX P 0 q .\n";
+        let aff = "SET UTF-8\nFULLSTRIP\nSFX A Y 1\nSFX A x 0 .\nPFX P Y 1\nPFX P 0 q x\n";
         let d = AffixDict::from_hunspell(aff, "1\nx/AP\n", &[]).unwrap();
-        for f in d.forms("x") {
-            assert!(!f.is_empty() && d.contains(&f), "x → {f:?}");
+        let mut forms = d.forms("x");
+        forms.sort();
+        assert_eq!(forms, ["qx", "x"], "`q` over the empty form fails the condition `x`");
+        assert!(d.contains("qx") && !d.contains("q"));
+    }
+
+    /// A prefix condition is checked on what the prefix is added to: the stem for the prefix
+    /// alone, the suffix form in a cross product, as `contains()` does. Under the condition `ab`,
+    /// `ac` + `-c+b` = `ab` takes `z`, and `ab` + `-b+c` = `ac` does not.
+    #[test]
+    fn prefix_conditions_apply_to_the_suffix_form_in_cross_products() {
+        let aff = "SET UTF-8\nPFX P Y 1\nPFX P 0 z ab\nSFX A Y 2\nSFX A c b c\nSFX A b c b\n";
+        let d = AffixDict::from_hunspell(aff, "2\nac/AP\nab/AP\n", &[]).unwrap();
+        for stem in ["ac", "ab"] {
+            for f in d.forms(stem) {
+                assert!(d.contains(&f), "{stem} → {f}");
+            }
         }
+        assert!(d.forms("ac").iter().any(|f| f == "zab"), "the cross product meets the condition");
+        assert!(!d.forms("ab").iter().any(|f| f == "zac") && !d.contains("zac"), "the cross product fails it");
     }
 }
