@@ -1558,9 +1558,6 @@ impl AffixDict {
                 continue;
             }
             let form = format!("{base}{}", r.add);
-            if form.is_empty() {
-                continue;
-            }
             let circ = self.cont_holds(r, self.circumfix);
             if r.cross {
                 cross_sfx.push((form.clone(), circ));
@@ -1570,8 +1567,9 @@ impl AffixDict {
                 chain.push((form.clone(), r.cont));
             }
             // A circumfix suffix or one that needs another affix is no word on its own.
+            // (An empty form still feeds the cross products and chains above; it is no word.)
             if !circ && !self.cont_holds(r, self.need_affix) {
-                out.push(form);
+                out.extend(non_empty(form));
             }
             if out.len() >= MAX_FORMS {
                 return out;
@@ -1598,16 +1596,13 @@ impl AffixDict {
                         continue;
                     }
                     let next = format!("{base}{}", r.add);
-                    if next.is_empty() {
-                        continue;
-                    }
                     if r.cont != 0 && queued.insert((next.clone(), r.cont)) {
                         chain.push((next.clone(), r.cont));
                     }
                     // A circumfix suffix or one that needs another affix is no word on its own,
                     // but a form it ends can still carry further suffixes.
                     if !self.cont_holds(r, self.circumfix) && !self.cont_holds(r, self.need_affix) {
-                        out.push(next);
+                        out.extend(non_empty(next));
                     }
                     if out.len() >= MAX_FORMS {
                         return out;
@@ -3152,6 +3147,23 @@ x/12
         }
         for w in ["workable", "workables", "nework"] {
             assert!(!d.contains(w), "{w}");
+        }
+    }
+
+    /// An empty form (`FULLSTRIP` stripping a whole stem to nothing) is no word itself, but what
+    /// a continuation class or a prefix adds to it is: `x` + `SFX A x 0/B`, `SFX B 0 y` makes `y`.
+    #[test]
+    fn an_empty_suffix_form_still_feeds_chains_and_prefixes() {
+        let aff = "SET UTF-8\nFULLSTRIP\nSFX A Y 1\nSFX A x 0/B .\nSFX B Y 1\nSFX B 0 y .\n";
+        let d = AffixDict::from_hunspell(aff, "1\nx/A\n", &[]).unwrap();
+        let mut forms = d.forms("x");
+        forms.sort();
+        assert_eq!(forms, ["x", "y"]);
+        assert!(d.contains("y") && !d.contains(""));
+        let aff = "SET UTF-8\nFULLSTRIP\nSFX A Y 1\nSFX A x 0 .\nPFX P Y 1\nPFX P 0 q .\n";
+        let d = AffixDict::from_hunspell(aff, "1\nx/AP\n", &[]).unwrap();
+        for f in d.forms("x") {
+            assert!(!f.is_empty() && d.contains(&f), "x → {f:?}");
         }
     }
 }
