@@ -62,4 +62,15 @@ mod tests {
         let d = TrDict::from_hunspell(aff, "1\nkitap/1,2\tpo:noun\n").unwrap();
         assert!(d.contains("kitaplar") && d.contains("kitapde"), "both flags before the field");
     }
+
+    /// #495 review: LibreOffice's `tr_TR.dic` has 920 entries with more than 1,024 flags
+    /// (`abart`, `savaş`, `inan`: up to 3,926); such a stem and its forms are words.
+    #[test]
+    fn a_stem_with_thousands_of_flags_is_a_word() {
+        let aff = "SET UTF-8\nFLAG num\nSFX 1 Y 1\nSFX 1 0 de .\nSFX 3999 Y 1\nSFX 3999 0 lar .\n";
+        let flags = (1..=4000).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        let d = TrDict::from_hunspell(aff, &format!("2\nabart/{flags}\nkitap\n")).unwrap();
+        assert!(d.contains("abart") && d.contains("abartde") && d.contains("abartlar") && d.contains("kitap"));
+        assert!(!d.contains("kitaplar"));
+    }
 }
