@@ -1,6 +1,6 @@
 //! Hyphenation exception dictionary: lowercase words with their break points.
 //!
-//! On-disk format (`assets/hyphenation/en-us.dic`): raw-deflate of
+//! On-disk format (craft-i18n's `language-data/en-us/en-us.dic`): raw-deflate of
 //! `"DCHYPH1\n"` followed by one line per word, sorted by the plain word's bytes. Each line is
 //! front-coded against the previous one: a byte with the shared prefix length (in bytes of the
 //! hyphenated form), then the rest of the hyphenated form (`-` at every break), then `\n`.
@@ -165,6 +165,7 @@ mod tests {
         assert!(back.get("dog").is_none());
     }
 
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn oversized_data_is_refused() {
         const LIMIT: usize = 1 << 16;

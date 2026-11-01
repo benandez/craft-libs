@@ -83,6 +83,7 @@ mod checker_tests {
         assert!(check_text_with(text, &[], &Options::default(), true, false).is_empty());
     }
 
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn english_keeps_its_marks_and_skips_vietnamese_names() {
         let text = "We met Nguyễn yesterdy at the office.";

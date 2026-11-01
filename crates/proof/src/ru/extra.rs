@@ -1,11 +1,11 @@
 //! Our supplement of Russian words older Hunspell dictionaries lack (`маркетплейс`, `промокод`,
-//! `интеграция`, `бонусный`…), from `assets/spelling/ru-extra.txt`: each base form with its
+//! `интеграция`, `бонусный`…), from craft-i18n's `language-data/ru/ru-extra.txt`: each base form with its
 //! declension, expanded here into every form.
 
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
-const EXTRA_RU: &str = include_str!("../../../../assets/spelling/ru-extra.txt");
+use crate::data::EXTRA_RU;
 
 /// Every form of the supplement: common words (lower case) and names (lower case too, but they
 /// only match a word written with a capital).
@@ -156,6 +156,7 @@ fn forms(base: &str, class: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn supplement_words_decline() {
         for w in [

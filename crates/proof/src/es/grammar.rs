@@ -336,7 +336,9 @@ mod tests {
     /// About 99 KB (under the 100,000-byte paragraph cap) took hundreds of milliseconds; it is now
     /// O(n log m): about 1 to 5 ms in a debug build, against about 300 ms for the scan, so the
     /// bound below leaves room on a loaded machine and still catches a return to the quadratic
-    /// lookup.
+    /// lookup. craft-libs builds tests at `opt-level = 0` (WordCraft used 1), where the linear
+    /// lookup took up to ~80 ms under a parallel test run, so the bound is 150 ms.
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn many_addresses_before_a_question_are_checked_quickly() {
         for (unit, ending, whole_paragraph) in
@@ -348,7 +350,7 @@ mod tests {
             let started = std::time::Instant::now();
             let issues = check(&text, ProofLang::Es);
             let took = started.elapsed();
-            assert!(took < std::time::Duration::from_millis(75), "{unit:?} took {took:?}");
+            assert!(took < std::time::Duration::from_millis(150), "{unit:?} took {took:?}");
             let missing: Vec<&Issue> = issues.iter().filter(|i| i.message.starts_with("Falta")).collect();
             assert_eq!(missing.len(), 1, "{unit:?}: {missing:?}");
             // The mark's sentence is the whole paragraph when the addresses don't end with a mark

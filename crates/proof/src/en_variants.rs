@@ -2,7 +2,7 @@
 //! English ([`ProofLang::En`], [`ProofLang::EnCa`], [`ProofLang::EnGb`]) accepts, which it flags,
 //! and what it suggests instead (`colour` → `color` in American English).
 //!
-//! The pairs come from `assets/spelling/en-variants.txt`, our own list of base forms with a
+//! The pairs come from craft-i18n's `language-data/en-us/en-variants.txt`, our own list of base forms with a
 //! policy per English. Inflections are generated here by rule for the regular patterns (-or/-our,
 //! -er/-re, -ize/-ise, -ense/-ence…), so `colours`, `centred` and `organisation` follow their
 //! base forms. A form is right when the shared English word list knows it or knows its other
@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 use crate::ProofLang;
 
 /// Our list of American/British pairs: `POLICY AMERICAN BRITISH` per line, `#` comments.
-const VARIANTS: &str = include_str!("../../../assets/spelling/en-variants.txt");
+use crate::data::EN_VARIANTS as VARIANTS;
 
 /// What one English does with a pair's two spellings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,6 +217,7 @@ pub fn is_foreign(lower: &str, lang: ProofLang) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn every_line_parses() {
         let lines = VARIANTS.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).count();

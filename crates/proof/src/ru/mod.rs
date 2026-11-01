@@ -399,6 +399,7 @@ mod tests {
         assert!(suggest::suggest_in(&none, "превет", 5).is_empty());
     }
 
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn russian_words_are_correct() {
         test_dict::install();

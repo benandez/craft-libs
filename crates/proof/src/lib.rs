@@ -1,9 +1,9 @@
-//! WordCraft proofing, per language. A run's language (its BCP 47 tag) picks the tools through
+//! Proofing for the Craft Apps (moved from WordCraft's `wordcraft-proof`), per language. A run's language (its BCP 47 tag) picks the tools through
 //! [`ProofLang`]; the `*_in` functions take it, the older English-only ones remain.
 //!
 //! - **English** ([`ProofLang::En`]; also text with no language): spelling against the
 //!   public-domain Moby word list (~160k words, the same list that drives hyphenation) plus our
-//!   supplement of modern words it lacks (`assets/spelling/en-extra.txt`: `desktop`, `email`,
+//!   supplement of modern words it lacks (craft-i18n's `language-data/en-us/en-extra.txt`: `desktop`, `email`,
 //!   `download`…), with inflections (`-s`, `-es`, `-ed`, `-ing`, `-ly`, `'s`…), a user dictionary and ignore lists;
 //!   suggestions by edit distance. Grammar checks that are cheap and reliable: repeated words,
 //!   `a`/`an`, capital letter after a sentence end, spaces before punctuation, doubled spaces.
@@ -47,9 +47,19 @@
 //!   Italian, German), Bulgarian syllable rules, Russian word-division rules, heuristic.
 //!
 //! [`check_text`] checks a paragraph whose runs are in different languages.
+//!
+//! **Language data** (the Moby word list, the pattern files, our word supplements) is embedded at
+//! build time from craft-i18n's `language-data/` (`CRAFT_I18N_DIR`, see `build.rs`). A build
+//! without it has none: English spelling marks nothing and has no suggestions, and hyphenation
+//! that needs the data is off; grammar and the rule-based hyphenation (Bulgarian, Turkish,
+//! Russian) are code and still work.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod affix;
+/// The Language data embedded from craft-i18n by `build.rs` (each constant empty when it isn't).
+mod data {
+    include!(concat!(env!("OUT_DIR"), "/language_data.rs"));
+}
 pub mod bg;
 pub mod cs;
 pub mod dict;
@@ -339,7 +349,7 @@ const COMMON: &str = "a an the and or but if of to in on at by for with from as 
 
 /// Our supplement of common words the Moby list lacks (`desktop`, `email`, `download`…): one
 /// lowercase base form per line, `#` comments. Inflections come from [`known_core`].
-const EXTRA_EN: &str = include_str!("../../../assets/spelling/en-extra.txt");
+use data::EXTRA_EN;
 
 fn extra_words() -> &'static HashSet<&'static str> {
     static E: OnceLock<HashSet<&str>> = OnceLock::new();
@@ -496,8 +506,17 @@ fn accepted_by_options(word: &str, opts: &Options) -> bool {
         || in_user_dictionary(&w.to_lowercase())
 }
 
+/// Is the English word list embedded? Without it English can't be checked, so every English
+/// word counts as correct (no red underlines), as in a language without a dictionary.
+fn english_data() -> bool {
+    !dict::Dictionary::en_us().is_empty()
+}
+
 /// [`is_correct`] with the File › Options › Proofing choices.
 pub fn is_correct_with(word: &str, opts: &Options) -> bool {
+    if !english_data() {
+        return true;
+    }
     let w = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'');
     let w = w.trim_matches('\'');
     if accepted_by_options(w, opts) {
@@ -578,6 +597,9 @@ fn english_preferred(lower: &str, lang: ProofLang) -> Option<String> {
 /// (`colour` in American English, `color` in British), plus this dialect's spellings of the
 /// list's words ([`en_variants`]). The user dictionary overrules both.
 fn is_correct_english(word: &str, lang: ProofLang, opts: &Options) -> bool {
+    if !english_data() {
+        return true;
+    }
     let w = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'').trim_matches('\'');
     if accepted_by_options(w, opts) {
         return true;
@@ -1016,6 +1038,11 @@ fn starts_consonant_sound(w: &str) -> bool {
     ["uni", "use", "usu", "eu", "one", "once", "ubiq", "uti", "ure", "uro"].iter().any(|p| l.starts_with(p))
 }
 
+/// The no-Language-data build (`build.rs` sets `craft_proof_data` when the English word list is
+/// embedded).
+#[cfg(all(test, not(craft_proof_data)))]
+mod no_data;
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1161,11 +1188,13 @@ mod tests {
         assert_eq!(grammar("elma ve armut. sonra kiraz", ProofLang::Tr, true), ["sonra"]);
     }
 
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn dictionary_loads() {
         assert!(dict::Dictionary::en_us().len() > 100_000);
     }
 
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn spelling() {
         for w in [
@@ -1196,6 +1225,7 @@ mod tests {
     }
 
     /// #1694: `-ically` adverbs come from their `-ic` adjective (specific → specifically).
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn ically_adverbs_are_known() {
         for w in ["specifically", "scientifically", "automatically", "dramatically", "Specifically"] {
@@ -1208,6 +1238,7 @@ mod tests {
 
     /// #1694 review: only `-ic` adjectives take `-ally`; other known words (dictionary or
     /// supplement) don't.
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn non_ic_words_do_not_take_ally() {
         for (base, wrong) in [("desktop", "desktopally"), ("house", "houseally"), ("final", "finalally"), ("green", "greenally")] {
@@ -1217,6 +1248,7 @@ mod tests {
     }
 
     /// #520: common modern words (and their inflections) are known; misspellings still flagged.
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn common_modern_words() {
         for w in [
@@ -1253,6 +1285,7 @@ mod tests {
 
     /// The supplement stays a sorted list of lowercase base forms.
     /// #40: British spellings and their inflections are not flagged.
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn british_spellings_are_known() {
         for w in [
@@ -1299,6 +1332,7 @@ mod tests {
 
     /// Each English accepts its own spellings and flags the other dialect's, suggesting its own
     /// first, as Word does (#1281, #1045).
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn english_dialects_flag_each_others_spellings() {
         let (us, gb, ca) = (ProofLang::En, ProofLang::EnGb, ProofLang::EnCa);
@@ -1391,6 +1425,7 @@ mod tests {
 
     /// The words #40 (folded into #1281) reported as flagged in British English, with their
     /// inflections: right in en-GB, and in en-US flagged or not as `en-variants.txt` decides.
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn british_words_reported_in_issue_40_are_right_in_en_gb() {
         let (us, gb, ca) = (ProofLang::En, ProofLang::EnGb, ProofLang::EnCa);
@@ -1470,6 +1505,7 @@ mod tests {
         assert!(check_spelling_in(text, gb).is_empty(), "{:?}", check_spelling_in(text, gb));
     }
 
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn user_dictionary_accepts_the_other_dialects_spelling() {
         add_word("savour");
@@ -1479,6 +1515,7 @@ mod tests {
         assert!(!is_correct_in("savour", ProofLang::En));
     }
 
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn supplement_is_sorted_lowercase() {
         let words: Vec<&str> = EXTRA_EN.lines().filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
@@ -1487,6 +1524,7 @@ mod tests {
         assert!(words.iter().all(|w| w.chars().all(|c| c.is_lowercase() || c == '\'' || c == '-')), "not lowercase");
     }
 
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn spelling_issues_in_text() {
         let t = "This sentense has a mispelled word, see https://example.com/xyzq.";
@@ -1495,6 +1533,7 @@ mod tests {
         assert_eq!(bad, vec!["sentense", "mispelled"]);
     }
 
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn address_token_covers_every_word_split_out_of_it() {
         // #1335: one whitespace-delimited token, however punctuation splits it, has one
@@ -1509,6 +1548,7 @@ mod tests {
         assert_eq!(bad.last(), Some(&"wugwug"), "{bad:?}");
     }
 
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn address_after_a_wide_space_is_an_internet_token() {
         // A web or e-mail address after a no-break space or an ideographic space is skipped,
@@ -1521,6 +1561,7 @@ mod tests {
         assert!(["xyzq", "blorp", "qwirpy", "zxq", "wugwug"].iter().all(|w| bad.contains(w)), "{bad:?}");
     }
 
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn spelling_scales_over_one_long_token() {
         // #1335: thousands of punctuation-separated words inside a single
@@ -1582,6 +1623,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn user_dictionary_works() {
         assert!(!is_correct("zxqwordcrafty"));
@@ -1590,6 +1632,7 @@ mod tests {
     }
 
     /// #40: the user dictionary survives a save and a fresh load.
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn user_dictionary_persists_through_a_file() {
         let dir = std::env::temp_dir().join(format!("wc-dict-{}-{}", std::process::id(), "persist"));
@@ -1612,6 +1655,7 @@ mod tests {
     }
 
     /// #40: a hostile file is capped: invalid lines are skipped, and only the first megabyte is read.
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn hostile_dictionary_files_are_capped() {
         let dir = std::env::temp_dir().join(format!("wc-dict-{}-{}", std::process::id(), "hostile"));
@@ -1634,6 +1678,7 @@ mod tests {
     }
 
     /// #40: saving merges in words another process saved, and leaves out the ones just removed.
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn saving_merges_with_the_file() {
         let dir = std::env::temp_dir().join(format!("wc-dict-{}-{}", std::process::id(), "merge"));
@@ -1651,6 +1696,7 @@ mod tests {
     }
 
     /// Ignore All lasts for the session: the word is accepted but isn't in the dictionary.
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn ignored_words_are_not_dictionary_words() {
         assert!(!is_correct("zxqignoredword"));
@@ -1749,6 +1795,7 @@ mod tests {
     }
 
     /// #100: runs in a language without a dictionary are never flagged; English still is.
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn non_english_words_are_not_flagged() {
         for w in ["ąžuolas", "élève", "über", "labas", "bonjour"] {
@@ -1761,6 +1808,7 @@ mod tests {
     }
 
     /// File › Options › Proofing (#485): each "Ignore" choice turned off makes those words count.
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn ignore_options_decide_what_is_checked() {
         let t = "SENTENSE helo2 www.exampel.org";
@@ -1772,6 +1820,7 @@ mod tests {
         assert!(is_correct_with("NASA", &all), "capitals that are a word stay correct");
     }
 
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn hyphenation() {
         let l = hyphen::Limits::default();
@@ -1782,6 +1831,7 @@ mod tests {
         v.iter().filter(|i| i.kind == IssueKind::Spelling).map(|i| t[i.start..i.end].to_string()).collect()
     }
 
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn each_language_uses_its_own_tools() {
         pl::test_dict::install();
@@ -1802,6 +1852,7 @@ mod tests {
         assert!(!g.iter().any(|i| i.message.contains("\"an\"")), "{g:?}");
     }
 
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn italian_uses_its_own_tools() {
         it::test_dict::install();
@@ -1817,6 +1868,7 @@ mod tests {
         assert!(g.iter().any(|i| i.message.contains("ripetuta")), "{g:?}");
     }
 
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn mixed_language_paragraphs_check_each_run_in_its_language() {
         pl::test_dict::install();
