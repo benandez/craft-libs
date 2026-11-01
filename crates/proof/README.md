@@ -65,16 +65,49 @@ data folder runs neither set.
 
 ## Language packs
 
+**API (fixed by `plan/pack-contract.md`, plus the additions marked ＋):**
+
+```rust
+// craft_proof::packs
+pub fn set_packs_dir(dir: Option<PathBuf>);            // <font-store folder>/language-packs; bumps dictionary_generation()
+pub fn reload();                                       // ＋ same folder, after a pack is installed or removed
+pub fn packs_dir() -> Option<PathBuf>;                 // ＋
+pub fn installed() -> Vec<InstalledPack>;              // InstalledPack { locale, name, licence, path }, by locale
+pub fn licence_texts() -> Vec<(String, String)>;       // (title, text): embedded English notices, then each pack's LICENCES/*
+pub fn load_errors() -> Vec<(String, String)>;         // ＋ (locale or folder, reason): packs skipped, pattern files that failed
+pub fn embedded_locales() -> &'static [&'static str];  // ＋ what this build embeds ("en-us"; more in a Language build)
+
+// craft_proof (crate root)
+pub enum ProofLang { …, Pack(PackLocale), Other }      // ＋ Pack: any language without tools of its own (nl, fr, sr-Latn…)
+pub struct PackLocale;                                 // ＋ Copy; PackLocale::new(tag) -> Option<Self>, .as_str() "nl-nl", .primary() "nl", Display
+impl ProofLang { pub fn pack_locale(self) -> Option<PackLocale>; } // ＋
+pub fn pack_dictionary_file(lang: ProofLang) -> Option<PathBuf>;  // ＋ the .dic a Pack language reads now; None = unchecked
+```
+
+`ProofLang::from_tag` now gives `Pack(locale)` for every valid language tag it has no tools for
+(`nl-NL` → `Pack("nl-nl")`, `fr-FR`, `ja-JP`, `sr-Latn`…); `Other` is left for `x-none`, `und`,
+`zxx`, `mul`, `mis`, `i-…` and malformed tags. A `Pack` language is spell-checked and given
+suggestions from its Hunspell dictionary (dictionaries folder → installed pack → system Hunspell)
+through the shared affix engine with default tuning, and hyphenated from its pack's
+`hyphenation.pat`; it has no grammar rules and the generic English spelling message. Without a
+dictionary or pack it behaves exactly as `Other` did (no marks, English hyphenation fallback).
+`has_dictionary(tag)` / `ProofLang::is_proofed()` say whether a `Pack` language has a dictionary
+now (read on first use, cached). At most 8 `Pack` dictionaries stay loaded (least recently used
+goes first). Downstream `match`es on `ProofLang` need a `Pack(_)` arm; `code()` is `""` for it, as
+for `Other` (use `pack_locale()`).
+
+**Which pack serves a language:** its locale, then shorter prefixes (`fr-ca` → `fr`), then another
+region's pack of the same language (`nl` → `nl-be`), never another script's (`sr-latn` never reads
+`sr`). The existing languages map their Hunspell names the same way (`pt_BR` → `pt-br`, `pt`, any
+`pt-*`).
+
 Spelling dictionaries and hyphenation patterns for other languages come as **Language packs**:
 the app's font store (`craft-font-store`, item kind `language-pack`) downloads, verifies and
 unpacks them; this crate reads them.
 
 ```rust
-craft_proof::packs::set_packs_dir(Some(store_folder.join("language-packs"))); // at startup
+craft_proof::packs::set_packs_dir(Some(store.language_packs_dir())); // at startup
 craft_proof::packs::reload();                       // after a pack is installed or removed
-let packs = craft_proof::packs::installed();        // Vec<InstalledPack { locale, name, licence, path }>
-let about = craft_proof::packs::licence_texts();    // Vec<(title, text)>: embedded notices, then each pack's
-let problems = craft_proof::packs::load_errors();   // Vec<(locale, reason)>: packs skipped, files that failed
 ```
 
 Both `set_packs_dir` and `reload` reload every dictionary without a restart and bump
@@ -104,11 +137,6 @@ has a value under a file-naming key (`path`, `file`, `files`, `*_path`, `*_file`
 that leaves the pack (`..`, an absolute path, a drive, a backslash). Folders starting with `.`
 (the store's temporary folders) are ignored. A dictionary that fails to load is reported by
 `dictionary_load_error` like any other; nothing panics.
-
-**Not yet:** packs only serve the languages this crate already proofs (the `ProofLang` slots).
-A pack for a language without a `ProofLang` (Dutch, French…) is listed, its licence shown, but
-its words aren't checked and `ProofLang::Other` keeps the English hyphenation fallback until that
-language gets a slot.
 
 ### English is always checked
 

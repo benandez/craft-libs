@@ -42,8 +42,11 @@
 //!   existing English fallback.
 //! - **German** ([`ProofLang::De`]): hyphenation by `hyph-utf8`'s German patterns (reformed
 //!   spelling, MIT); no spelling or grammar marks yet.
-//! - **Other languages** ([`ProofLang::Other`]): no spelling or grammar marks, like Word without
-//!   the language's proofing tools.
+//! - **Any other language** ([`ProofLang::Pack`], module [`packs`]): spelling and suggestions
+//!   from its Hunspell dictionary (an installed Language pack, the dictionaries folder or the
+//!   system's) with default tuning, hyphenation from its pack, no grammar rules; without a
+//!   dictionary no marks, like Word without the language's proofing tools.
+//! - **No language** ([`ProofLang::Other`]: `x-none`, `zxx`, malformed tags): no marks.
 //! - **Hyphenation** ([`hyphen`]): dictionary, Liang patterns (English, Polish, Portuguese,
 //!   Italian, German), Bulgarian syllable rules, Russian word-division rules, heuristic.
 //!
@@ -76,6 +79,7 @@ pub mod hyphen;
 pub mod id;
 pub mod it;
 pub mod lang;
+mod pack_lang;
 pub mod packs;
 pub mod patterns;
 pub mod pl;
@@ -110,7 +114,7 @@ impl Default for Options {
 }
 
 pub use english::EnglishSource;
-pub use lang::ProofLang;
+pub use lang::{PackLocale, ProofLang};
 
 /// A problem found in text: byte range, kind, message and suggestions.
 #[derive(Clone, Debug, PartialEq)]
@@ -314,7 +318,15 @@ pub(crate) fn reload_dictionaries() {
         l.slot.reload();
     }
     english::reload();
+    pack_lang::reload();
     DICTIONARY_GENERATION.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The `.dic` file a [`ProofLang::Pack`] language's spelling is read from now (the dictionaries
+/// folder, an installed Language pack or the system's); `None` when it has none (unchecked) or
+/// `lang` isn't a pack language. Reads the dictionary once (it is cached afterwards).
+pub fn pack_dictionary_file(lang: ProofLang) -> Option<std::path::PathBuf> {
+    pack_lang::dictionary_file(lang.pack_locale()?)
 }
 
 /// Each language that reads an installed Hunspell dictionary, with the `.dic` file found for it
@@ -330,6 +342,9 @@ pub fn installed_dictionaries() -> Vec<(ProofLang, Option<std::path::PathBuf>)> 
 pub fn dictionary_load_error(lang: ProofLang) -> Option<String> {
     if matches!(lang, ProofLang::En | ProofLang::EnGb | ProofLang::EnCa) {
         return english::load_error(lang);
+    }
+    if let ProofLang::Pack(l) = lang {
+        return pack_lang::load_error(l);
     }
     hunspell::load_error(language(lang)?.slot.name()).map(|(_, reason)| reason)
 }
@@ -827,6 +842,9 @@ pub fn is_correct_in_with(word: &str, lang: ProofLang, opts: &Options) -> bool {
     if lang.is_english() {
         return is_correct_english(word, lang, opts);
     }
+    if let ProofLang::Pack(l) = lang {
+        return accepted_by_options(word, opts) || pack_lang::is_correct(word, l, opts);
+    }
     // A language WordCraft doesn't proof (Bulgarian, German, any other) has no spelling marks.
     language(lang).is_none_or(|l| accepted_by_options(word, opts) || (l.is_correct)(word, lang, opts))
 }
@@ -837,6 +855,9 @@ pub fn suggest_in(word: &str, max: usize, lang: ProofLang) -> Vec<String> {
     let word = &*composed(word);
     if lang.is_english() {
         return suggest_english(word, max, lang);
+    }
+    if let ProofLang::Pack(l) = lang {
+        return pack_lang::suggest(word, max, l);
     }
     language(lang).map_or_else(Vec::new, |l| (l.suggest)(word, max, lang))
 }
@@ -1347,6 +1368,8 @@ mod tests {
     #[test]
     fn an_installed_pack_is_used_and_a_removed_one_is_not() {
         let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The test dictionaries on disk first, so a reload never leaves other tests without them.
+        set_dictionaries_folder(Some(shared_test_folder()));
         let root = std::env::temp_dir().join(format!("wc-proof-packs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (folder, packs) = (root.join("dictionaries"), root.join("language-packs"));
@@ -1414,12 +1437,98 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// CP4.2: a language with no tools of its own (Dutch) is spell-checked, given suggestions and
+    /// hyphenated from its installed Language pack; removed, it is unchecked again; English is
+    /// unaffected. No grammar rules for it.
+    #[test]
+    fn a_pack_proofs_a_language_without_its_own_tools() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The test dictionaries on disk first, so a reload never leaves other tests without them.
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let root = std::env::temp_dir().join(format!("wc-proof-nl-pack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let nl = ProofLang::from_tag(Some("nl-NL"));
+        assert_eq!(nl.pack_locale().map(|l| l.to_string()).as_deref(), Some("nl-nl"));
+        let text = "Het huis en de fietz.";
+        let english_before = check_text(text, &[]);
+        let unchecked = |lang: ProofLang| check_text(text, &[(0..text.len(), lang)]).iter().all(|i| i.kind == IssueKind::Grammar);
+        let before = (is_correct_in("fietz", nl), hyphen::hyphenate_word_in("xxnaxx", &hyphen::Limits::default(), nl), pack_dictionary_file(nl));
+        let pack = write_pack(
+            &root,
+            "nl",
+            &[
+                ("spelling.aff", b"SET UTF-8\nTRY esianrtolducgmphbykfvwjzxq\nSFX E Y 1\nSFX E 0 en .\n"),
+                ("spelling.dic", b"5\nhet\nhuis/E\nen\nde\nfiets/E\n"),
+                ("hyphenation.pat", b"1na xx\n"),
+            ],
+        );
+        packs::set_packs_dir(Some(root.clone()));
+        assert!(nl.is_proofed() && has_dictionary(Some("nl-BE")) && !has_dictionary(Some("fr-FR")));
+        assert_eq!(pack_dictionary_file(nl), Some(pack.join("spelling.dic")));
+        assert_eq!(pack_dictionary_file(ProofLang::from_tag(Some("nl"))), Some(pack.join("spelling.dic")), "a region falls back to the pack");
+        for w in ["huis", "Huis", "huizen", "huisen", "fietsen", "HUIS"] {
+            assert_eq!(is_correct_in(w, nl), w != "huizen", "{w}");
+        }
+        let issues = check_text(text, &[(0..text.len(), nl)]);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!((issues[0].kind, &text[issues[0].start..issues[0].end], issues[0].lang), (IssueKind::Spelling, "fietz", nl));
+        assert!(suggest_in("fietz", 5, nl).contains(&"fiets".to_string()), "{:?}", suggest_in("fietz", 5, nl));
+        assert!(check_grammar_in("de de huis", nl).is_empty(), "no grammar rules");
+        assert_eq!(hyphen::hyphenate_word_in("xxnaxx", &hyphen::Limits::default(), nl), "xx-naxx");
+        assert!(unchecked(ProofLang::from_tag(Some("fr-FR"))), "a language with no pack stays unchecked");
+        assert_eq!(check_text(text, &[]), english_before, "English is unaffected");
+        // A broken dictionary is reported, never a panic.
+        std::fs::write(pack.join("spelling.aff"), "SET SHIFT_JIS\n").unwrap();
+        packs::reload();
+        assert!(is_correct_in("fietz", nl) && !nl.is_proofed());
+        assert!(dictionary_load_error(nl).unwrap_or_default().contains("unsupported encoding"));
+        // Removed: unchecked again.
+        std::fs::remove_dir_all(&pack).unwrap();
+        packs::reload();
+        assert_eq!(
+            (is_correct_in("fietz", nl), hyphen::hyphenate_word_in("xxnaxx", &hyphen::Limits::default(), nl), pack_dictionary_file(nl)),
+            before
+        );
+        assert!(unchecked(nl) || before.2.is_some());
+        assert_eq!(check_text(text, &[]), english_before);
+        packs::set_packs_dir(None);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// At most [`pack_lang::MAX_LOADED`] pack-language dictionaries stay loaded; others load again
+    /// when used.
+    #[test]
+    fn pack_language_dictionaries_are_capped() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The test dictionaries on disk first, so a reload never leaves other tests without them.
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let root = std::env::temp_dir().join(format!("wc-proof-many-packs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let locales: Vec<String> = (0..pack_lang::MAX_LOADED + 3).map(|i| format!("q{}", (b'a' + i as u8) as char)).collect();
+        for l in &locales {
+            write_pack(&root, l, &[("spelling.aff", b"SET UTF-8\n"), ("spelling.dic", format!("1\nword{l}\n").as_bytes())]);
+        }
+        packs::set_packs_dir(Some(root.clone()));
+        for _ in 0..2 {
+            for l in &locales {
+                let lang = ProofLang::from_tag(Some(l));
+                assert!(is_correct_in(&format!("word{l}"), lang) && !is_correct_in("wordzz", lang), "{l}");
+            }
+        }
+        packs::set_packs_dir(None);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// CP4.2, hostile packs: a missing or broken `pack.toml`, a path outside the pack, a folder
     /// that isn't a language tag, a symbolic link, patterns that aren't UTF-8 or a dictionary that
     /// can't be read are reported, never a panic, and the pack (or that file) is skipped.
     #[test]
     fn corrupt_packs_are_reported_and_skipped() {
         let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The test dictionaries on disk first, so a reload never leaves other tests without them.
+        set_dictionaries_folder(Some(shared_test_folder()));
         let root = std::env::temp_dir().join(format!("wc-proof-bad-packs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         // Good spelling (the test words, so Croatian tests running meanwhile are unaffected), bad

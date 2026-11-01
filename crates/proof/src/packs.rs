@@ -362,10 +362,16 @@ fn locales_for(names: &[&str]) -> Vec<String> {
     for n in names {
         push(n.to_ascii_lowercase().replace('_', "-"));
     }
-    for n in names {
+    // The primary language alone, unless a script is named (`sr_Latn` is never plain `sr`).
+    for n in names.iter().filter(|n| !has_script(n)) {
         push(n.split(['_', '-']).next().unwrap_or_default().to_ascii_lowercase());
     }
     out
+}
+
+/// Does a tag or file name name a script (a four-letter subtag after the language: `sr-Latn`)?
+fn has_script(tag: &str) -> bool {
+    tag.split(['_', '-']).skip(1).any(|p| p.len() == 4 && p.bytes().all(|b| b.is_ascii_alphabetic()))
 }
 
 /// The installed packs to read for `locales`, in that order, then any other pack of their
@@ -379,10 +385,11 @@ fn packs_for(locales: &[String], has: impl Fn(&Holds) -> bool) -> Vec<PathBuf> {
             out.push(p.path.clone());
         }
     }
-    let primaries: Vec<&str> = locales.iter().map(|l| l.split('-').next().unwrap_or_default()).collect();
+    // Then another region's pack of the same language (`pt` → `pt-br`), never another script's.
+    let primaries: Vec<&str> = locales.iter().filter(|l| !has_script(l)).map(|l| l.split('-').next().unwrap_or_default()).collect();
     for (p, _) in usable() {
         let primary = p.locale.split('-').next().unwrap_or_default();
-        if primaries.contains(&primary) && !out.contains(&p.path) {
+        if primaries.contains(&primary) && !has_script(&p.locale) && !out.contains(&p.path) {
             out.push(p.path.clone());
         }
     }
@@ -416,6 +423,7 @@ fn hyphenation_locales(lang: ProofLang) -> Vec<String> {
         ProofLang::Es419 => &["es-419", "es"],
         ProofLang::EsUy => &["es-uy", "es-419", "es"],
         ProofLang::De => &["de", "de-1996", "de-de"],
+        ProofLang::Pack(l) => return crate::pack_lang::hyphenation_locales(l),
         ProofLang::En | ProofLang::EnGb | ProofLang::EnCa | ProofLang::Other => &[],
     };
     names.iter().map(|n| (*n).to_string()).collect()
