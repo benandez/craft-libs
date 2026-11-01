@@ -896,6 +896,12 @@ pub fn check_text(text: &str, spans: &[(Range<usize>, ProofLang)]) -> Vec<Issue>
 /// `list_item` marks a list paragraph: items are often fragments, so the English rule asking for
 /// a capital on the paragraph's first word is off for it (later sentences are still checked).
 pub fn check_text_with(text: &str, spans: &[(Range<usize>, ProofLang)], opts: &Options, grammar: bool, list_item: bool) -> Vec<Issue> {
+    // A paragraph in many pack languages loads each dictionary once.
+    pack_lang::in_one_check(|| check_text_once(text, spans, opts, grammar, list_item))
+}
+
+/// [`check_text_with`], inside one [`pack_lang::in_one_check`].
+fn check_text_once(text: &str, spans: &[(Range<usize>, ProofLang)], opts: &Options, grammar: bool, list_item: bool) -> Vec<Issue> {
     // Sorted, empty ones dropped, neighbours of one language merged.
     let mut sorted: Vec<&(Range<usize>, ProofLang)> = spans.iter().filter(|(r, _)| r.start < r.end).collect();
     sorted.sort_by_key(|s| s.0.start);
@@ -1527,26 +1533,71 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// At most [`pack_lang::MAX_LOADED`] pack-language dictionaries stay loaded; others load again
-    /// when used.
+    /// Pack languages for the cache tests: `qa`, `qb`… each knowing `word<locale>`.
+    fn many_packs(root: &std::path::Path, n: usize) -> Vec<ProofLang> {
+        (0..n)
+            .map(|i| {
+                let l = format!("q{}", (b'a' + i as u8) as char);
+                write_pack(root, &l, &[("spelling.aff", b"SET UTF-8\n"), ("spelling.dic", format!("1\nword{l}\n").as_bytes())]);
+                ProofLang::from_tag(Some(&l))
+            })
+            .collect()
+    }
+
+    /// Review of #485: ten pack languages used in turn stay loaded (a memory budget, not eight
+    /// entries), so switching between them never reads a dictionary again.
     #[test]
-    fn pack_language_dictionaries_are_capped() {
+    fn many_pack_languages_load_once() {
         let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        // The test dictionaries on disk first, so a reload never leaves other tests without them.
         set_dictionaries_folder(Some(shared_test_folder()));
         let root = std::env::temp_dir().join(format!("wc-proof-many-packs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let locales: Vec<String> = (0..pack_lang::MAX_LOADED + 3).map(|i| format!("q{}", (b'a' + i as u8) as char)).collect();
-        for l in &locales {
-            write_pack(&root, l, &[("spelling.aff", b"SET UTF-8\n"), ("spelling.dic", format!("1\nword{l}\n").as_bytes())]);
-        }
+        let langs = many_packs(&root, 10);
         packs::set_packs_dir(Some(root.clone()));
-        for _ in 0..2 {
-            for l in &locales {
-                let lang = ProofLang::from_tag(Some(l));
-                assert!(is_correct_in(&format!("word{l}"), lang) && !is_correct_in("wordzz", lang), "{l}");
+        let loads = pack_lang::loads();
+        let start = std::time::Instant::now();
+        // A paragraph of 20 words over the ten languages, checked 50 times.
+        let mut text = String::new();
+        let mut spans = Vec::new();
+        for k in 0..20 {
+            let lang = langs[k % 10];
+            let w = format!("word{} ", lang.pack_locale().unwrap());
+            spans.push((text.len()..text.len() + w.len(), lang));
+            text.push_str(&w);
+        }
+        for _ in 0..50 {
+            assert!(check_text(&text, &spans).is_empty());
+            for lang in &langs {
+                assert!(!is_correct_in("wordzz", *lang));
             }
         }
+        assert_eq!(pack_lang::loads() - loads, 10, "each dictionary is read once");
+        assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?}", start.elapsed());
+        // A language with no dictionary takes no room and is not looked up again.
+        assert!(is_correct_in("anything", ProofLang::from_tag(Some("qz"))));
+        packs::set_packs_dir(None);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Review of #485: over the memory budget, a dictionary used during the current paragraph is
+    /// never evicted, so the paragraph loads each once.
+    #[test]
+    fn a_paragraph_never_evicts_its_own_dictionaries() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let root = std::env::temp_dir().join(format!("wc-proof-budget-packs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let langs = many_packs(&root, 2);
+        packs::set_packs_dir(Some(root.clone()));
+        pack_lang::set_budget(1);
+        let (a, b) = (langs[0], langs[1]);
+        let text = "wordqa wordqb wordqa wordqb wordqa wordqb";
+        let spans: Vec<(Range<usize>, ProofLang)> = (0..6).map(|k| (k * 7..k * 7 + 6, if k % 2 == 0 { a } else { b })).collect();
+        let loads = pack_lang::loads();
+        assert!(check_text(text, &spans).is_empty());
+        assert_eq!(pack_lang::loads() - loads, 2);
+        pack_lang::set_budget(pack_lang::MAX_LOADED_BYTES);
         packs::set_packs_dir(None);
         set_dictionaries_folder(Some(shared_test_folder()));
         let _ = std::fs::remove_dir_all(&root);

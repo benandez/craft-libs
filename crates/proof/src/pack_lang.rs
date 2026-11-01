@@ -2,40 +2,89 @@
 //! dictionaries folder, then an installed Language pack, then the system's), read by the shared
 //! affix engine, with default suggestion tuning and no grammar rules.
 //!
-//! At most [`MAX_LOADED`] dictionaries stay loaded; the one used least recently goes first.
+//! The loaded dictionaries share a memory budget ([`MAX_LOADED_BYTES`], estimated from their
+//! files); the one used least recently goes first, but never one used during the current
+//! [`in_one_check`] call, so a paragraph in many languages loads each dictionary once. Locales
+//! with no dictionary are remembered apart and take no room.
 
+use std::cell::Cell;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use crate::affix::AffixDict;
 use crate::affix_suggest::Tuning;
 use crate::lang::PackLocale;
 
-/// Most locale dictionaries kept loaded at once.
-pub(crate) const MAX_LOADED: usize = 8;
+/// The memory budget of the loaded dictionaries, in estimated bytes.
+pub(crate) const MAX_LOADED_BYTES: u64 = 256 << 20;
+/// Estimated memory per byte of `.aff` and `.dic` file.
+const BYTES_PER_FILE_BYTE: u64 = 6;
+/// Most locales remembered as having no dictionary (the list is cleared when full).
+const MAX_MISSING: usize = 256;
+
+/// The budget in force (tests lower it).
+static BUDGET: AtomicU64 = AtomicU64::new(MAX_LOADED_BYTES);
+/// Dictionaries loaded from disk so far (tests count them).
+static LOADS: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    /// The clock when this thread's current [`in_one_check`] call started.
+    static CHECK_FROM: Cell<Option<u64>> = const { Cell::new(None) };
+}
 
 struct Loaded {
     locale: PackLocale,
     dict: Arc<AffixDict>,
-    /// The `.dic` it came from (`None`: none found, the language is unchecked).
+    /// The `.dic` it came from.
     file: Option<PathBuf>,
+    /// Estimated memory.
+    bytes: u64,
     used: u64,
 }
 
 struct Cache {
     loaded: Vec<Loaded>,
+    /// Locales with no dictionary (or one that failed to load).
+    missing: Vec<PackLocale>,
     clock: u64,
     /// Counts reloads, so a load that started before one is not kept.
     reloads: u64,
 }
 
-static CACHE: RwLock<Cache> = RwLock::new(Cache { loaded: Vec::new(), clock: 0, reloads: 0 });
+static CACHE: RwLock<Cache> = RwLock::new(Cache { loaded: Vec::new(), missing: Vec::new(), clock: 0, reloads: 0 });
 
 /// Forget every loaded dictionary (the dictionaries folder or the packs changed).
 pub(crate) fn reload() {
     let mut c = CACHE.write().unwrap_or_else(PoisonError::into_inner);
     c.loaded.clear();
+    c.missing.clear();
     c.reloads = c.reloads.wrapping_add(1);
+}
+
+/// Run `f` as one check (a paragraph): no dictionary it uses is evicted before it returns, even
+/// over the budget.
+pub(crate) fn in_one_check<R>(f: impl FnOnce() -> R) -> R {
+    let outer = CHECK_FROM.with(Cell::get);
+    if outer.is_none() {
+        let now = CACHE.read().unwrap_or_else(PoisonError::into_inner).clock;
+        CHECK_FROM.with(|c| c.set(Some(now.wrapping_add(1))));
+    }
+    let r = f();
+    if outer.is_none() {
+        CHECK_FROM.with(|c| c.set(None));
+    }
+    r
+}
+
+#[cfg(test)]
+pub(crate) fn loads() -> u64 {
+    LOADS.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+pub(crate) fn set_budget(bytes: u64) {
+    BUDGET.store(bytes, Ordering::Relaxed);
 }
 
 /// Hunspell file names for `locale`, best first: `fr-fr` → `fr_FR`, `fr-FR`, `fr`;
@@ -89,35 +138,56 @@ fn get(locale: PackLocale) -> (Arc<AffixDict>, Option<PathBuf>) {
             l.used = now;
             return (l.dict.clone(), l.file.clone());
         }
+        if c.missing.contains(&locale) {
+            return (Arc::default(), None);
+        }
         c.reloads
     };
-    let (dict, file) = load(locale);
+    let (dict, file, bytes) = load(locale);
     let mut c = CACHE.write().unwrap_or_else(PoisonError::into_inner);
-    if c.reloads == reloads && !c.loaded.iter().any(|l| l.locale == locale) {
-        if c.loaded.len() >= MAX_LOADED
-            && let Some(oldest) = c.loaded.iter().enumerate().min_by_key(|(_, l)| l.used).map(|(i, _)| i)
-        {
-            c.loaded.swap_remove(oldest);
-        }
-        let used = c.clock;
-        c.loaded.push(Loaded { locale, dict: dict.clone(), file: file.clone(), used });
+    if c.reloads != reloads || c.loaded.iter().any(|l| l.locale == locale) || c.missing.contains(&locale) {
+        return (dict, file);
     }
+    if dict.is_empty() {
+        if c.missing.len() >= MAX_MISSING {
+            c.missing.clear();
+        }
+        c.missing.push(locale);
+        return (dict, file);
+    }
+    LOADS.fetch_add(1, Ordering::Relaxed);
+    let budget = BUDGET.load(Ordering::Relaxed);
+    let pinned_from = CHECK_FROM.with(Cell::get).unwrap_or(u64::MAX);
+    let mut total: u64 = c.loaded.iter().map(|l| l.bytes).sum();
+    while total.saturating_add(bytes) > budget {
+        // The least recently used dictionary not used during this check.
+        let Some(oldest) = c.loaded.iter().enumerate().filter(|(_, l)| l.used < pinned_from).min_by_key(|(_, l)| l.used).map(|(i, _)| i) else {
+            break;
+        };
+        let gone = c.loaded.swap_remove(oldest);
+        total = total.saturating_sub(gone.bytes);
+    }
+    let used = c.clock;
+    c.loaded.push(Loaded { locale, dict: dict.clone(), file: file.clone(), bytes, used });
     (dict, file)
 }
 
-fn load(locale: PackLocale) -> (Arc<AffixDict>, Option<PathBuf>) {
+/// Load `locale`'s dictionary, with its estimated memory.
+fn load(locale: PackLocale) -> (Arc<AffixDict>, Option<PathBuf>, u64) {
     let names = names(locale);
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let key = names.first().map_or("", String::as_str);
     let Some((aff, dic)) = crate::hunspell::find(&refs) else {
         crate::hunspell::clear_load_error(key);
-        return (Arc::default(), None);
+        return (Arc::default(), None, 0);
     };
+    let size = |p: &std::path::Path| std::fs::metadata(p).map_or(0, |m| m.len());
+    let bytes = size(&aff).saturating_add(size(&dic)).saturating_mul(BYTES_PER_FILE_BYTE).max(1);
     match crate::hunspell::note_load(key, &dic, crate::hunspell::load(&aff, &dic)) {
-        Ok(d) => (Arc::new(d), Some(dic)),
+        Ok(d) => (Arc::new(d), Some(dic), bytes),
         Err(e) => {
             log::warn!("{locale} spelling: {e}");
-            (Arc::default(), None)
+            (Arc::default(), None, 0)
         }
     }
 }
