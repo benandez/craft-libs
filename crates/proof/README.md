@@ -93,7 +93,7 @@ through the shared affix engine with default tuning, and hyphenated from its pac
 dictionary or pack it behaves exactly as `Other` did (no marks, English hyphenation fallback).
 `has_dictionary(tag)` / `ProofLang::is_proofed()` say whether a `Pack` language has a dictionary
 now (read on first use, cached). Loaded `Pack` dictionaries share a 256 MB budget (estimated from their files); the least recently used goes first, but never one used in the paragraph being checked, and languages with no dictionary take no room. Downstream `match`es on `ProofLang` need a `Pack(_)` arm; `code()` stays `&'static str`
-and is `""` for it, as for `Other`: use `pack_locale()` for its locale.
+and is `""` for it, as for `Other`: anything that keys, saves or reports a language (settings, caches, JSON/MCP output) uses `tag()`, which is `code()` for the built-ins and the locale (`nl`, `fr-fr`) for a pack language.
 
 **Which pack serves a language:** its locale, then shorter prefixes (`fr-ca` → `fr`), then another
 region's pack of the same language (`nl` → `nl-be`), never another script's (`sr-latn` never reads

@@ -176,7 +176,8 @@ impl ProofLang {
 
     /// The primary language subtag (`en`, `pl`, `bg`, `tr`, `ru`, `cs`, `id`, `de`, `es`); empty for
     /// [`ProofLang::Other`] and for a [`ProofLang::Pack`] language, whose locale isn't `'static`:
-    /// use [`ProofLang::pack_locale`] (`PackLocale::as_str`) for it. Kept `'static` so existing
+    /// use [`ProofLang::tag`] wherever the code names the language (keys, settings, saved or
+    /// reported values), or every pack language would read the same. Kept `'static` so existing
     /// callers (`PROOFED.map(ProofLang::code)`) don't break.
     pub fn code(self) -> &'static str {
         match self {
@@ -207,6 +208,18 @@ impl ProofLang {
             ProofLang::De => PackLocale::new("de-DE"),
             ProofLang::Bg => PackLocale::new("bg-BG"),
             _ => None,
+        }
+    }
+
+    /// The code that names this language, for keys, settings and reported values: [`code`] for
+    /// the built-in languages (`en`, `es`, …), the locale for a [`ProofLang::Pack`] one (`nl`,
+    /// `sr-latn`), so no two pack languages share one; empty for [`ProofLang::Other`].
+    ///
+    /// [`code`]: ProofLang::code
+    pub fn tag(self) -> std::borrow::Cow<'static, str> {
+        match self {
+            ProofLang::Pack(l) => std::borrow::Cow::Owned(l.as_str().to_string()),
+            other => std::borrow::Cow::Borrowed(other.code()),
         }
     }
 
@@ -478,6 +491,18 @@ mod tests {
         assert!(ProofLang::Pl.is_proofed() && !ProofLang::Other.is_proofed());
     }
 
+    /// Two pack languages never share a key: `tag()` is the locale, while `code()` is empty.
+    #[test]
+    fn tag_names_each_pack_language() {
+        let (nl, fr) = (ProofLang::from_tag(Some("nl")), ProofLang::from_tag(Some("fr-FR")));
+        assert_eq!((nl.code(), fr.code()), ("", ""));
+        assert_eq!((nl.tag().as_ref(), fr.tag().as_ref()), ("nl", "fr-fr"));
+        for l in ProofLang::PROOFED {
+            assert_eq!(l.tag(), l.code());
+        }
+        assert_eq!(ProofLang::Other.tag(), "");
+    }
+
     #[test]
     fn tags_reject_unknown_or_partial_language_codes() {
         // A partial code is another language, never the one it starts like.
@@ -485,6 +510,7 @@ mod tests {
             let lang = ProofLang::from_tag(Some(tag));
             assert_eq!(lang.pack_locale().map(|l| l.to_string()), Some(tag.to_ascii_lowercase()), "{tag}");
             assert_eq!(lang.code(), "", "{tag}: a pack language's locale is pack_locale()");
+            assert_eq!(lang.tag(), lang.pack_locale().map(|l| l.as_str().to_string()).unwrap_or_default(), "{tag}");
         }
         assert_tags(&["x-none", "e", "-", "und", "zxx", "i-klingon"], ProofLang::Other);
     }
