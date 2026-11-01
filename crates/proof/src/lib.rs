@@ -2465,6 +2465,22 @@ mod tests {
         assert_eq!(suggest_in("programmes", 5, us).first().map(String::as_str), Some("programs"));
     }
 
+    /// Review follow-up: British English takes `-ize` (Oxford spelling) but never `-yze`, also in
+    /// forms en-variants.txt doesn't list. Hunspell 1.7.5 with SCOWL's en_GB rejects these too.
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
+    #[test]
+    fn british_english_rejects_unlisted_yze_forms() {
+        crate::hold_dictionary_tests();
+        let gb = ProofLang::EnGb;
+        for w in ["reanalyze", "reanalyzed", "breathalyze", "breathalyzer", "paralyzingly", "catalyze", "analyzer"] {
+            assert!(!is_correct_in(w, gb), "en-GB: {w}");
+            assert!(is_correct_in(w, ProofLang::En), "en-US: {w}");
+        }
+        for w in ["reanalyse", "breathalyser", "paralysingly", "catalyse", "organize", "realization"] {
+            assert!(is_correct_in(w, gb), "en-GB: {w}");
+        }
+    }
+
     /// More British spellings that must stay right in en-GB and en-AU (#1281): -re, single l, ae,
     /// with their inflections.
     #[test]

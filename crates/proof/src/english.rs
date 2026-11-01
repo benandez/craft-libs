@@ -348,11 +348,12 @@ pub(crate) fn is_correct(word: &str, lang: ProofLang, opts: &Options, policy: bo
         || (policy && !parts.is_empty() && parts.iter().all(|p| s.knows_lower(p) || crate::en_variants::known_variant(p, lang, |x| s.knows_lower(x))))
 }
 
-/// `w` with its `-ize`/`-yze` endings (and their forms: `-ization`, `-izing`…) spelled `-ise`/
-/// `-yse`, when it has any: British English takes both (Word accepts `organize` and `organise` in
-/// en-GB), and SCOWL's en-GB dictionary has only `-ise`. A `z` between `i`/`y` and a vowel is
-/// swapped; the `-ize` form counts only when American or Canadian English spells the word so
-/// ([`ize_elsewhere`]), or `wize` would pass as `wise`.
+/// `w` with its `-ize` endings (and their forms: `-ization`, `-izing`…) spelled `-ise`, when it
+/// has any: British English takes both (Word accepts `organize` and `organise` in en-GB), and
+/// SCOWL's en-GB dictionary has only `-ise`. A `z` between `i` and a vowel is swapped; the `-ize`
+/// form counts only when American or Canadian English spells the word so ([`ize_elsewhere`]), or
+/// `wize` would pass as `wise`. Never `-yze`: Oxford spelling has `analyse`, `paralyse`, so
+/// `reanalyze` or `breathalyzer` is American in British English, as Hunspell's en_GB says.
 pub(crate) fn ise_spelling(w: &str) -> Option<String> {
     let b = w.as_bytes();
     let mut out = b.to_vec();
@@ -360,7 +361,7 @@ pub(crate) fn ise_spelling(w: &str) -> Option<String> {
     for i in 1..b.len() {
         let after = b.get(i + 1).is_some_and(|c| b"aeiAEI".contains(c));
         if after
-            && matches!(b.get(i - 1), Some(b'i' | b'y' | b'I' | b'Y'))
+            && matches!(b.get(i - 1), Some(b'i' | b'I'))
             && let Some(c) = out.get_mut(i)
         {
             match *c {
@@ -511,6 +512,18 @@ fn list_suggest(word: &str, max: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review follow-up: only `-ize` is swapped for `-ise`, never `-yze` for `-yse` (Oxford
+    /// spelling has `analyse`), so `reanalyze`, `breathalyzer`, `paralyzingly` stay American.
+    #[test]
+    fn ise_spelling_swaps_ize_only() {
+        assert_eq!(ise_spelling("organize").as_deref(), Some("organise"));
+        assert_eq!(ise_spelling("Realizations").as_deref(), Some("Realisations"));
+        assert_eq!(ise_spelling("ORGANIZING").as_deref(), Some("ORGANISING"));
+        for w in ["reanalyze", "reanalyzed", "breathalyze", "breathalyzer", "paralyzingly", "catalyze", "Analyzer", "ANALYZE"] {
+            assert_eq!(ise_spelling(w), None, "{w}");
+        }
+    }
 
     #[test]
     fn built_in_list_is_the_whole_moby_list() {
