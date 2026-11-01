@@ -1825,6 +1825,11 @@ impl AffixDict {
         rules
     }
 
+    /// Whether the dictionary sets `CHECKSHARPS` (`SS` may stand for `ß` in capitals).
+    pub(crate) fn check_sharps(&self) -> bool {
+        self.check_sharps
+    }
+
     /// The `TRY` letters, most frequent first (suggestions try these).
     pub fn try_chars(&self) -> &str {
         &self.try_chars
