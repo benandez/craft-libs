@@ -1563,6 +1563,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Review of #485: a pack's patterns hyphenate only words in the language's script: a Latin
+    /// word in a Russian or Dutch run is hyphenated as it was without the pack.
+    #[test]
+    fn pack_patterns_only_hyphenate_their_script() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let root = std::env::temp_dir().join(format!("wc-proof-script-hyphen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let lim = hyphen::Limits::default();
+        let (ru, el) = (ProofLang::Ru, ProofLang::from_tag(Some("el")));
+        let before = [hyphen::hyphenate_word_in("hyphenation", &lim, ru), hyphen::hyphenate_word_in("hyphenation", &lim, el)];
+        write_pack(&root, "ru", &[("hyphenation.pat", "1на 1ка\n".as_bytes())]);
+        write_pack(&root, "el", &[("hyphenation.pat", "1να 1κα\n".as_bytes())]);
+        packs::set_packs_dir(Some(root.clone()));
+        assert_eq!([hyphen::hyphenate_word_in("hyphenation", &lim, ru), hyphen::hyphenate_word_in("hyphenation", &lim, el)], before);
+        assert_eq!(hyphen::hyphenate_word_in("канака", &lim, ru), "ка-на-ка", "a Russian word uses the pack");
+        assert_eq!(hyphen::hyphenate_word_in("κανακα", &lim, el), "κα-να-κα");
+        packs::set_packs_dir(None);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Pack languages for the cache tests: `qa`, `qb`… each knowing `word<locale>`.
     fn many_packs(root: &std::path::Path, n: usize) -> Vec<ProofLang> {
         (0..n)

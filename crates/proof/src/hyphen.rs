@@ -128,8 +128,12 @@ fn core_breaks(core: &[char], lang: ProofLang) -> (Vec<usize>, Source) {
     if n < 2 {
         return (vec![], Source::None);
     }
-    // An installed Language pack's patterns come before the embedded ones and the rules.
-    if let Some(p) = crate::packs::hyphenation(lang) {
+    // An installed Language pack's patterns come before the embedded ones and the rules, for a
+    // word in the language's script; any other word goes on as before (a Latin word in a Russian
+    // run is hyphenated as English).
+    if let Some(p) = crate::packs::hyphenation(lang)
+        && pack_patterns_fit(lang, &p, core)
+    {
         return if lang == ProofLang::Pl { core_breaks_pl_with(&p, core) } else { core_breaks_patterns(&p, core) };
     }
     if lang == ProofLang::Pl {
@@ -178,6 +182,19 @@ fn core_breaks(core: &[char], lang: ProofLang) -> (Vec<usize>, Source) {
         return (p, Source::Patterns);
     }
     (heuristic_points(core), Source::Heuristic)
+}
+
+/// Does a pack's `pats` hyphenate `core` in `lang`? Russian, Bulgarian and Turkish: a word in
+/// their script (the guard their rules use). Polish, Portuguese, Italian and German: every word,
+/// as their embedded patterns do. Any other language: a word whose letters the patterns know.
+fn pack_patterns_fit(lang: ProofLang, pats: &Patterns, core: &[char]) -> bool {
+    match lang {
+        ProofLang::Ru => core.iter().all(|&c| crate::ru::is_cyrillic(c)),
+        ProofLang::Bg => core.iter().all(|&c| crate::bg::is_letter(c)),
+        ProofLang::Tr => core.iter().all(|&c| crate::tr::hyphen::is_letter(c)),
+        ProofLang::Pl | ProofLang::Pt | ProofLang::It | ProofLang::De => true,
+        _ => pats.values(core).is_some(),
+    }
 }
 
 /// Polish: exception words, then the patterns, then the Polish syllable heuristic.

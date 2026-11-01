@@ -126,8 +126,9 @@ locale (`nl`, `pt-br`, `sr-latn`):
 **Lookup order.** Spelling: the dictionaries folder, then an installed pack, then the system's
 Hunspell dictionaries, then (English only) the built-in core list. A slot's Hunspell names map to
 pack locales (`pt_BR` → `pt-br`, then `pt`, then any other `pt-*` pack). Hyphenation, every
-language but English: an installed pack's patterns, then the embedded ones (a Language build),
-then the language's rules or the English fallback as before.
+language but English: an installed pack's patterns for a word in the language's script (Russian,
+Bulgarian, Turkish: their script; others: letters the patterns know), then the embedded ones (a
+Language build), then the language's rules or the English fallback as before.
 
 **Hostile packs.** Every file is read only if it is a regular file (never through a symbolic
 link), size-capped (`pack.toml` 1 MB, licences 4 MB, dictionaries and patterns 64 MB), and a pack
