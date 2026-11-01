@@ -840,6 +840,10 @@ impl Stage {
     pub(crate) fn new(store: &Path) -> Result<Self, Error> {
         static N: AtomicU64 = AtomicU64::new(0);
         let dir = store.join(STAGING).join(format!("{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+        // A folder left by an earlier process with the same id is cleared, not mixed in.
+        if std::fs::symlink_metadata(&dir).is_ok() {
+            std::fs::remove_dir_all(&dir).map_err(io("clearing an old download folder"))?;
+        }
         std::fs::create_dir_all(&dir).map_err(io("creating a download folder"))?;
         Ok(Self { dir })
     }

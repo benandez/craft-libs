@@ -318,3 +318,18 @@ fn hostile_archives_are_refused() {
     unpack(&pack_archive("nl", "x"), &dest).unwrap();
     assert!(dest.join("LICENCES/COPYING").is_file());
 }
+
+/// A staging folder an earlier process with the same id left behind is cleared, so an unpack
+/// (`create_new`) can't fail on, or mix in, its files.
+#[test]
+fn a_stale_stage_folder_is_cleared() {
+    let store = temp("stale-stage");
+    let staging = store.join(".staging");
+    for n in 0..512 {
+        let d = staging.join(format!("{}-{n}", std::process::id()));
+        std::fs::create_dir_all(d.join("nl")).unwrap();
+        std::fs::write(d.join("nl/pack.toml"), b"old").unwrap();
+    }
+    let stage = Stage::new(&store).unwrap();
+    assert_eq!(std::fs::read_dir(&stage.dir).unwrap().count(), 0, "{}", stage.dir.display());
+}
