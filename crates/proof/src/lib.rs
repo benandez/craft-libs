@@ -1226,6 +1226,39 @@ mod tests {
         assert_ne!(english_source(ProofLang::En), Some(EnglishSource::Hunspell(dir.join("en_US.dic"))));
     }
 
+    /// CP4.2: with no embedded word list, English looks in the dictionaries folder, then an
+    /// installed English Language pack, then the system's Hunspell, then the built-in list.
+    #[test]
+    fn an_english_pack_comes_after_the_dictionaries_folder() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let root = std::env::temp_dir().join(format!("wc-proof-en-pack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (dir, packs) = (root.join("dictionaries"), root.join("language-packs"));
+        let aff: &[u8] = b"SET UTF-8\nSFX S Y 1\nSFX S 0 s .\n";
+        let pack = write_pack(&packs, "en-us", &[("spelling.aff", aff), ("spelling.dic", b"2\nzzpackword\nhouse/S\n")]);
+        packs::set_packs_dir(Some(packs.clone()));
+        let english: &[(&str, &[u8], &[u8])] = &[("en_US", aff, b"2\nzzfolderword\nhouse/S\n")];
+        folder_with_english(&dir, english);
+        if english_data() {
+            assert_eq!(english_source(ProofLang::En), Some(EnglishSource::Embedded));
+        } else {
+            assert_eq!(english_source(ProofLang::En), Some(EnglishSource::Hunspell(dir.join("en_US.dic"))), "the folder first");
+            assert!(is_correct_in("zzfolderword", ProofLang::En) && !is_correct_in("zzpackword", ProofLang::En));
+        }
+        drop_english_files(&dir, english);
+        if !english_data() {
+            assert_eq!(english_source(ProofLang::En), Some(EnglishSource::Hunspell(pack.join("spelling.dic"))), "then the pack");
+            assert!(is_correct_in("zzpackword", ProofLang::En) && is_correct_in("houses", ProofLang::En));
+        }
+        packs::set_packs_dir(None);
+        if !english_data() {
+            assert_ne!(english_source(ProofLang::En), Some(EnglishSource::Hunspell(pack.join("spelling.dic"))), "a removed pack is not used");
+        }
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// R6.4: an English Hunspell dictionary that is there but can't be read (an encoding we don't
     /// read, bytes that aren't UTF-8, no words) is an error reported for its English, never a
     /// panic, and that English falls back to the next dictionary or the built-in word list, which

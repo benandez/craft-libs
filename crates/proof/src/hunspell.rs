@@ -164,10 +164,10 @@ pub fn find(names: &[&str]) -> Option<(PathBuf, PathBuf)> {
         .or_else(|| system.iter().find_map(|dir| find_in(dir, names)))
 }
 
-/// Every `<name>.aff`/`<name>.dic` pair for `names`, name by name, each in every folder
-/// ([`search_dirs`], the dictionaries folder first): a file with the first name in a system
-/// folder comes before one with the second name in the dictionaries folder. A caller that can't
-/// read one tries the next.
+/// Every `<name>.aff`/`<name>.dic` pair for `names`, in the order [`find`] prefers them: the
+/// dictionaries folders, then installed Language packs for `names` (their `spelling.aff`/
+/// `spelling.dic`), then the system's folders; folder by folder, each folder's in the order of
+/// `names`. A caller that can't read one tries the next.
 pub fn candidates(names: &[&str]) -> Vec<(PathBuf, PathBuf)> {
     let lo = names.first().copied().map(lo_ext_dirs);
     candidates_in(&search_dirs(lo.as_deref()), names)
