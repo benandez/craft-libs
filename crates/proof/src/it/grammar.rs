@@ -44,6 +44,9 @@ const NOT_FEMININE_IN_A: &[&str] = &["acrobata", "autodidatta", "alfa", "omega",
 /// Abbreviations written with a final period after which a sentence goes on in lower case
 /// (lower case, without the period).
 const ABBREVIATIONS: &[&str] = &[
+    "pp",
+    "tab",
+    "dr",
     "ecc",
     "es",
     "dott",
@@ -392,7 +395,12 @@ mod tests {
         assert!(fixes("Vado a Roma. il cane dorme.").contains(&pair("il", "Il")));
         assert!(fixes("Vado a Roma? sì.").contains(&pair("sì", "Sì")));
         assert!(!fixes("Vado a Roma. Il cane dorme.").iter().any(|(_, b)| b == "Il"));
-        assert!(!fixes("Il sig. rossi arriva.").iter().any(|(a, _)| a == "rossi"), "after an abbreviation");
+        for t in ["Il sig. rossi arriva.", "Vedi pp. dieci e oltre.", "Nella tab. due.", "Il dr. bianchi arriva.", "Mele, pere ecc. sono frutti."] {
+            assert!(
+                !fixes(t).iter().any(|(_, b)| b.starts_with(char::is_uppercase) && b != "Il" && b != "Vedi" && b != "Nella" && b != "Mele"),
+                "after an abbreviation: {t}"
+            );
+        }
     }
 
     #[test]
