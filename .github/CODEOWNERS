@@ -1,4 +1,0 @@
-# craft-proof moved here from WordCraft's crates/proof; the WordCraft maintainers own it.
-# Confirm these handles before merge (WordCraft has no CODEOWNERS file to copy from).
-/crates/proof/ @dylanmtaylor @aiongg @skylartaylor
-/.github/workflows/proof.yml @dylanmtaylor @aiongg @skylartaylor

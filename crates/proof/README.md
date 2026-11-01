@@ -88,6 +88,10 @@ cargo check -p craft-proof --target wasm32-unknown-unknown
 
 CI: `.github/workflows/proof.yml`.
 
+## Owners
+
+WordCraft maintainers: echelon, dylanmtaylor, aiongg.
+
 ## Licence
 
 MIT OR Apache-2.0. The Language data carries its own licences, recorded in craft-i18n's
