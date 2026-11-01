@@ -580,10 +580,12 @@ pub fn has_dictionary(lang: Option<&str>) -> bool {
     ProofLang::from_tag(lang).is_proofed()
 }
 
-/// The Hunspell dictionary name (`pl_PL`, `it_IT`) a proofing language needs but doesn't have
-/// installed, for a status-bar hint (#1167). `None` when the language's dictionary is available,
-/// or when it needs none (English has a built-in word list; unproofed languages aren't offered
-/// one). Reads the dictionary once (it is cached afterwards).
+/// The Hunspell dictionary name (`pl_PL`, `it_IT`, `nl_NL`) a proofing language needs but doesn't
+/// have installed, for a status-bar hint (#1167). `None` when the language's dictionary is
+/// available, when it needs none (English has a built-in word list), or for a tag that is no
+/// language (`x-none`, `zxx`). Any other language is named by its tag, even one no Hunspell
+/// dictionary exists for (`ja`, `zh`, `th`): the caller decides whether to show the hint. Reads
+/// the dictionary once (it is cached afterwards).
 pub fn missing_dictionary(lang: Option<&str>) -> Option<&'static str> {
     let lang = ProofLang::from_tag(lang);
     dictionary_needed(lang, dictionary_loaded(lang)?)
@@ -614,30 +616,37 @@ fn dictionary_needed(lang: ProofLang, installed: bool) -> Option<&'static str> {
         return None;
     }
     if let Some(l) = lang.spelling_locale() {
-        return pack_lang::names(l).first().and_then(|n| interned(n));
+        return pack_lang::names(l).first().map(|n| interned(n));
     }
     language(lang).map(|l| l.slot.name())
 }
 
 /// `name` as a `&'static str` (the API hands out Hunspell names that way), for at most
-/// [`MAX_INTERNED`] names; `None` after that.
-fn interned(name: &str) -> Option<&'static str> {
+/// [`MAX_INTERNED`] names; after that, [`UNINTERNED`], so the hint still shows.
+fn interned(name: &str) -> &'static str {
     // ponytail: leaks each distinct pack dictionary name once, capped; a `Cow` API if more matter.
     static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
-    let mut names = NAMES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    interned_in(&mut NAMES.lock().unwrap_or_else(std::sync::PoisonError::into_inner), name)
+}
+
+/// [`interned`] with the names kept so far.
+fn interned_in(names: &mut Vec<&'static str>, name: &str) -> &'static str {
     if let Some(n) = names.iter().find(|n| **n == name) {
-        return Some(n);
+        return n;
     }
     if names.len() >= MAX_INTERNED {
-        return None;
+        return UNINTERNED;
     }
     let n: &'static str = Box::leak(name.to_string().into_boxed_str());
     names.push(n);
-    Some(n)
+    n
 }
 
 /// Most pack dictionary names [`interned`] keeps.
 const MAX_INTERNED: usize = 256;
+
+/// The name [`interned`] gives once it keeps no more.
+const UNINTERNED: &str = "a Hunspell dictionary";
 
 /// Is `word` spelled correctly in the run's proofing language? A language without a dictionary
 /// can't be checked, so every word counts as correct (no red underlines for it).
@@ -939,7 +948,8 @@ fn grammar_in(text: &str, lang: ProofLang, capital_first: bool) -> Vec<Issue> {
         ProofLang::En => grammar_en(text, capital_first),
         ProofLang::EnGb | ProofLang::EnCa => grammar_en(text, capital_first).into_iter().map(|i| Issue { lang, ..i }).collect(),
         // `pt-pt` shares Portuguese's rules, its issues in its own language.
-        _ => language(lang.built_in()).map_or_else(Vec::new, |l| (l.grammar)(text, lang, capital_first).into_iter().map(|i| Issue { lang, ..i }).collect()),
+        _ => language(lang.built_in())
+            .map_or_else(Vec::new, |l| (l.grammar)(text, lang, capital_first).into_iter().map(|i| Issue { lang, ..i }).collect()),
     }
 }
 
@@ -1703,7 +1713,8 @@ mod tests {
             std::fs::write(system.join(format!("{name}.dic")), "1\nx\n").unwrap();
             system.join(format!("{name}.dic"))
         };
-        let pack = |locale: &str| write_pack(&packs_dir, locale, &[("spelling.aff", b"SET UTF-8\n"), ("spelling.dic", b"1\nx\n")]).join("spelling.dic");
+        let pack =
+            |locale: &str| write_pack(&packs_dir, locale, &[("spelling.aff", b"SET UTF-8\n"), ("spelling.dic", b"1\nx\n")]).join("spelling.dic");
         let tag = |t: &str| ProofLang::from_tag(Some(t));
         packs::set_packs_dir(Some(packs_dir.clone()));
 
@@ -1770,6 +1781,18 @@ mod tests {
         packs::set_packs_dir(None);
         set_dictionaries_folder(Some(shared_test_folder()));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Second review of #485: past [`MAX_INTERNED`] names the hint still names a dictionary.
+    #[test]
+    fn interned_names_fall_back_to_a_generic_one() {
+        let mut names = Vec::new();
+        for i in 0..MAX_INTERNED {
+            assert_eq!(interned_in(&mut names, &format!("xx_{i}")), format!("xx_{i}"));
+        }
+        assert_eq!(interned_in(&mut names, "xx_0"), "xx_0", "a kept name is still given");
+        assert_eq!(interned_in(&mut names, "yy_YY"), UNINTERNED);
+        assert_eq!(names.len(), MAX_INTERNED);
     }
 
     /// Review of #485: German and Bulgarian, which have hyphenation of their own but no

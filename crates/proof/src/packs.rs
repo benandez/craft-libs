@@ -161,7 +161,7 @@ pub fn licence_texts() -> Vec<(String, String)> {
     let mut left: u64 = MAX_LICENCE_TOTAL;
     for (p, _) in &scan().packs {
         for (file, text) in licence_files(&p.path, &mut left) {
-            out.push((format!("{} ({}): {file}", p.name, p.locale), text));
+            out.push((format!("{} ({}): {}", p.name, p.locale, plain_text(&file)), text));
         }
         if left == 0 {
             log::warn!("Language pack licences: {MAX_LICENCE_TOTAL} bytes in all; the rest aren't shown");
@@ -287,12 +287,12 @@ fn parse_pack_toml(text: &str) -> Result<PackInfo, String> {
     if !is_locale(&locale) {
         return Err(format!("pack.toml: {locale:?} isn't a lowercase language tag"));
     }
-    let licence = string("licence").or_else(|| string("license")).filter(|l| !l.trim().is_empty()).ok_or("pack.toml: no licence")?;
+    let licence = string("licence").or_else(|| string("license")).map(|l| plain_text(&l)).filter(|l| !l.is_empty()).ok_or("pack.toml: no licence")?;
     let name = string("name").map(|n| plain_text(&n)).filter(|n| !n.is_empty());
-    Ok(PackInfo { locale, name, licence: licence.chars().take(200).collect() })
+    Ok(PackInfo { locale, name, licence })
 }
 
-/// Text from a pack shown to people (its name): without control, bidirectional or other format
+/// Text from a pack shown to people (its name, licence and licence file names): without control, bidirectional or other format
 /// characters (U+202E would reverse what follows), trimmed, at most 200 characters.
 pub(crate) fn plain_text(s: &str) -> String {
     s.chars().filter(|&c| !c.is_control() && !is_format(c)).take(200).collect::<String>().trim().to_string()
@@ -607,6 +607,10 @@ mod tests {
         assert_eq!(parse_pack_toml(t).unwrap().name.as_deref(), Some("Nederlands"));
         let t = "locale = \"nl\"\nlicence = \"MIT\"\nname = \"\\u202e\\u200f\"\n";
         assert_eq!(parse_pack_toml(t).unwrap().name, None, "nothing left: the locale is shown");
+        let t = "locale = \"nl\"\nlicence = \"MIT\\u202e LPG\"\n";
+        assert_eq!(parse_pack_toml(t).unwrap().licence, "MIT LPG");
+        let t = "locale = \"nl\"\nlicence = \"\\u200f\"\n";
+        assert!(parse_pack_toml(t).is_err(), "no licence left");
     }
 
     #[test]

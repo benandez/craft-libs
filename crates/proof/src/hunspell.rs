@@ -174,7 +174,13 @@ pub fn candidates(names: &[&str]) -> Vec<(PathBuf, PathBuf)> {
 }
 
 /// [`candidates`] over the given folders.
-pub(crate) fn ordered(names: &[&str], dirs: &[PathBuf], region_packs: &[PathBuf], system: &[PathBuf], other_packs: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
+pub(crate) fn ordered(
+    names: &[&str],
+    dirs: &[PathBuf],
+    region_packs: &[PathBuf],
+    system: &[PathBuf],
+    other_packs: &[PathBuf],
+) -> Vec<(PathBuf, PathBuf)> {
     let norm = |n: &str| n.to_ascii_lowercase().replace('_', "-");
     let first = names.first().map(|n| norm(n));
     let (region, rest): (Vec<&str>, Vec<&str>) = names.iter().copied().partition(|n| Some(norm(n)) == first);
