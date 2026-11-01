@@ -7,9 +7,10 @@
 //! come from its own dictionary, and a word is right when its own dictionary knows it: the other
 //! dialects' dictionaries are never asked (en-US would take `colourblind` from en-GB's). SCOWL
 //! picks one spelling per dialect (en-GB `-ise` has no `organize`, en-US no `judgement`), and Word
-//! accepts more, so British English also takes the `-ize` spellings of its `-ise` words, and
-//! `en-variants.txt` widens each dialect by its pairs (`crate::english`). An English dictionary in the dictionaries folder comes first; a SCOWL dictionary that isn't
-//! embedded, or fails to load, leaves that English to the next source (`crate::english`).
+//! accepts more, so British English also takes the `-ize` spellings of its `-ise` words that
+//! en-US or en-CA spells so, and `en-variants.txt` widens each dialect by its pairs
+//! (`crate::english`). An English dictionary in the dictionaries folder comes first; a SCOWL
+//! dictionary that isn't embedded, or fails to load, leaves that English to the next source (`crate::english`).
 //!
 //! SCOWL is under its own permissive licence and the affix files under Ispell's BSD licence;
 //! [`notice`] is the upstream text, for an About window.

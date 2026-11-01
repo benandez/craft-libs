@@ -74,8 +74,8 @@ English spelling uses the first of these that is there; `english_source(lang)` s
    dictionary knows it (or `en-extra.txt` does), never because another English's does
    (`colourblind` is wrong in en-US, `colorblind` in en-GB); suggestions come from the same
    dictionary. SCOWL's size-60 lists keep one spelling per dialect, and Word accepts more, so
-   British English also takes the `-ize` spellings of its `-ise` words (`organize`,
-   `realization`), and `en-variants.txt` flags the other dialect's spellings and accepts this
+   British English also takes the `-ize` spellings of its `-ise` words that American or Canadian
+   English spell so (`organize`, `realization`; never `wize` or `advize`), and `en-variants.txt` flags the other dialect's spellings and accepts this
    dialect's other spellings of known words (`judgement` in en-US). English with no dialect
    (`is_correct`) takes a word any of the three knows. Suggestions offer a missing space only
    between two lower-case words of three letters or more, after every one-word candidate, and no

@@ -1781,6 +1781,26 @@ mod tests {
         }
     }
 
+    /// craft-libs#483 re-review: British English takes the `-ize` spelling of an `-ise` word only
+    /// when American or Canadian English spells it so; a misspelling whose `-s-` form is a word
+    /// (`wize`, `advize`) stays wrong, as in Hunspell's en-GB.
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
+    #[test]
+    fn british_ize_needs_a_real_ize_word() {
+        let wrong = [
+            "wize", "rize", "noize", "dizease", "advize", "rizing", "praize", "raize", "poize", "wizer", "surprize", "arize", "revize", "devize",
+            "mizer", "concize", "precize", "exercize", "chaize",
+        ];
+        for l in [ProofLang::EnGb, ProofLang::from_tag(Some("en-AU"))] {
+            for w in wrong.iter().chain(&["colorize"]) {
+                assert!(!is_correct_in(w, l), "{w} in {l:?}");
+            }
+            for w in ["organize", "realization", "colourize", "organizing", "realizes"] {
+                assert!(is_correct_in(w, l), "{w} in {l:?}");
+            }
+        }
+    }
+
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn user_dictionary_accepts_the_other_dialects_spelling() {

@@ -290,7 +290,7 @@ fn generic(s: Speller) -> Speller {
     match s {
         Speller::Scowl(..) => {
             let all: Vec<_> = [ProofLang::En, ProofLang::EnGb, ProofLang::EnCa].into_iter().filter_map(crate::scowl::dict).collect();
-            Speller::Scowl(all, true)
+            Speller::Scowl(all, false)
         }
         other => other,
     }
@@ -301,7 +301,12 @@ impl Speller {
     fn knows(&self, w: &str) -> bool {
         match self {
             Speller::Hunspell(d, _) => affix_correct(&[d.as_ref()], w, false),
-            Speller::Scowl(ds, ise) => affix_correct(ds, w, true) || (*ise && ise_spelling(w).is_some_and(|x| affix_correct(ds, &x, true))),
+            Speller::Scowl(ds, ise) => {
+                affix_correct(ds, w, true)
+                    || (*ise
+                        && ise_spelling(w).is_some_and(|x| affix_correct(ds, &x, true))
+                        && ize_elsewhere(w, |d, p| affix_correct(&[d], p, false)))
+            }
             Speller::List => list_correct(w),
         }
     }
@@ -310,7 +315,9 @@ impl Speller {
     fn knows_lower(&self, p: &str) -> bool {
         match self {
             Speller::Hunspell(d, _) => d.check(p),
-            Speller::Scowl(ds, ise) => ds.iter().any(|d| d.check(p) || (*ise && ise_spelling(p).is_some_and(|x| d.check(&x)))),
+            Speller::Scowl(ds, ise) => {
+                ds.iter().any(|d| d.check(p) || (*ise && ise_spelling(p).is_some_and(|x| d.check(&x)) && ize_elsewhere(p, |d, p| d.check(p))))
+            }
             Speller::List => crate::known_in_word_list(p),
         }
     }
@@ -339,7 +346,8 @@ pub(crate) fn is_correct(word: &str, lang: ProofLang, opts: &Options, policy: bo
 /// `w` with its `-ize`/`-yze` endings (and their forms: `-ization`, `-izing`…) spelled `-ise`/
 /// `-yse`, when it has any: British English takes both (Word accepts `organize` and `organise` in
 /// en-GB), and SCOWL's en-GB dictionary has only `-ise`. A `z` between `i`/`y` and a vowel is
-/// swapped (`citizen` → `citisen`, which no dictionary knows, so that does no harm).
+/// swapped; the `-ize` form counts only when American or Canadian English spells the word so
+/// ([`ize_elsewhere`]), or `wize` would pass as `wise`.
 pub(crate) fn ise_spelling(w: &str) -> Option<String> {
     let b = w.as_bytes();
     let mut out = b.to_vec();
@@ -359,6 +367,12 @@ pub(crate) fn ise_spelling(w: &str) -> Option<String> {
         }
     }
     if changed { String::from_utf8(out).ok() } else { None }
+}
+
+/// Is `w` a word in American or Canadian English's SCOWL dictionary (`check` asks one): the
+/// `-ize` spellings British English takes are theirs (`organize`, never `advize` or `wize`).
+fn ize_elsewhere(w: &str, check: impl Fn(&AffixDict, &str) -> bool) -> bool {
+    [ProofLang::En, ProofLang::EnCa].into_iter().filter_map(crate::scowl::dict).any(|d| check(d, w))
 }
 
 /// Against affix dictionaries (any of them): the word, or each part of a hyphenated one; with
