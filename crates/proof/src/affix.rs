@@ -1560,9 +1560,13 @@ impl AffixDict {
             self.flags.iter().any(|&id| self.set(id).contains(&flag))
                 || self.prefixes.iter().chain(&self.suffixes).any(|r| r.flag == flag || self.set(r.cont).contains(&flag))
         };
-        for (directive, flag) in
-            [("FORBIDDENWORD", self.forbidden), ("NOSUGGEST", self.no_suggest), ("SUBSTANDARD", self.substandard), ("KEEPCASE", self.keepcase), ("ONLYINCOMPOUND", self.only_in_compound)]
-        {
+        for (directive, flag) in [
+            ("FORBIDDENWORD", self.forbidden),
+            ("NOSUGGEST", self.no_suggest),
+            ("SUBSTANDARD", self.substandard),
+            ("KEEPCASE", self.keepcase),
+            ("ONLYINCOMPOUND", self.only_in_compound),
+        ] {
             if let Some(flag) = flag.filter(|&f| self.flag_mode != FlagMode::Char || used(f)) {
                 out.push_str(directive);
                 out.push(' ');
@@ -2370,6 +2374,19 @@ pub(crate) mod tests {
         // The directives that change which words are right are still refused.
         for dir in ["NEEDAFFIX", "CIRCUMFIX", "PSEUDOROOT", "FULLSTRIP"] {
             assert!(AffixDict::from_hunspell_english(&format!("{dir} X\n"), dic, &[]).is_err(), "{dir}");
+        }
+    }
+
+    /// The English path reads `ONLYINCOMPOUND` in the dictionary's FLAG mode too.
+    #[test]
+    fn english_onlyincompound_reads_long_and_numeric_flags() {
+        for (aff, dic) in [
+            ("FLAG long\nONLYINCOMPOUND cc\nCOMPOUNDMIN 1\nSFX Ss Y 1\nSFX Ss 0 s .\n", "3\nhouse/Ss\n1st/cc\nnth/Sscc\n"),
+            ("FLAG num\nONLYINCOMPOUND 7\nCOMPOUNDMIN 1\nSFX 1 Y 1\nSFX 1 0 s .\n", "3\nhouse/1\n1st/7\nnth/1,7\n"),
+        ] {
+            let d = AffixDict::from_hunspell_english(aff, dic, &[]).unwrap();
+            assert!(d.check("house") && d.check("houses"), "{aff}");
+            assert!(!d.check("1st") && !d.check("nth") && !d.check("nths"), "{aff}");
         }
     }
 
