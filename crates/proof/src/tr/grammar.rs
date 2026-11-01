@@ -172,9 +172,22 @@ pub fn check_with(text: &str, capital_first: bool) -> Vec<Issue> {
         let (idx, c) = chars[i];
         if matches!(c, ',' | '.' | '?' | '!' | ';' | ':') && i > 0 && chars[i - 1].1 == ' ' {
             let prev_sp = chars[i - 1].0;
-            // Leave emoticons and ellipses alone
-            let is_dot_in_dots = c == '.' && (i + 1 < chars.len() && chars[i + 1].1 == '.');
-            if !is_dot_in_dots {
+            // Leave ellipses (` ...`), numbers (` .5`), emoticons (` :)`, ` ;-)`, ` :D`) and
+            // scores (`3 : 1`) alone.
+            let after = chars.get(i + 1).map(|&(_, a)| a);
+            let ratio = c == ':'
+                && i >= 2
+                && chars.get(i - 2).is_some_and(|&(_, b)| b.is_ascii_digit())
+                && after == Some(' ')
+                && chars.get(i + 2).is_some_and(|&(_, d)| d.is_ascii_digit());
+            let flag = !ratio
+                && match c {
+                    ',' => true,
+                    ';' => !matches!(after, Some(')' | '(' | '-' | 'P' | 'D')),
+                    '.' => !matches!(after, Some('.')) && !after.is_some_and(|a| a.is_ascii_digit()),
+                    _ => after.is_none_or(|a| a.is_whitespace() || matches!(a, '"' | '”' | '’' | '!' | '?')),
+                };
+            if flag {
                 v.push(Issue {
                     start: prev_sp,
                     end: idx + c.len_utf8(),
@@ -268,7 +281,13 @@ pub fn check_with(text: &str, capital_first: bool) -> Vec<Issue> {
         let prev_word = text.get(ws[i - 1].0..prev_end).unwrap_or("");
         if let Some(gap) = text.get(prev_end..w_start) {
             let trimmed = gap.trim();
+            // A space must follow the mark (`rapor.txt`, `www.example.com` are one token), and a
+            // number before a period is an ordinal (`5. sınıf`, `21. yüzyıl`).
+            let spaced = gap.rfind(['.', '?', '!']).and_then(|m| gap.get(m + 1..)).is_some_and(|rest| rest.contains(char::is_whitespace));
+            let ordinal = trimmed.ends_with('.') && prev_word.chars().any(|c| c.is_ascii_digit());
             if (trimmed.ends_with('.') || trimmed.ends_with('?') || trimmed.ends_with('!'))
+                && spaced
+                && !ordinal
                 && !trimmed.contains("...")
                 && !ABBREVIATIONS.contains(&prev_word.to_lowercase().as_str())
                 && let Some(w) = text.get(w_start..w_end)
@@ -309,6 +328,27 @@ pub fn turkish_capitalize(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CodeRabbit on craft-libs#484/#489: emoticons, decimals and scores aren't stray spaces;
+    /// ordinals and file or web names don't end a sentence.
+    #[test]
+    fn emoticons_numbers_ordinals_and_names_are_left_alone() {
+        for ok in [
+            "Harika :)",
+            "Tamam ;)",
+            "Süper :D",
+            "Oran .5 oldu.",
+            "Maç 3 : 1 bitti.",
+            "Ali 5. sınıfta okuyor.",
+            "Bina 21. yüzyıldan kalma.",
+            "Dosyayı rapor.txt olarak kaydet.",
+            "Adres www.example.com olarak yazıldı.",
+        ] {
+            assert!(check(ok).is_empty(), "{ok}: {:?}", check(ok));
+        }
+        assert_eq!(check("Gel , bak.").len(), 1, "a real stray space is still flagged");
+        assert_eq!(check("Geldi. bu iyi.").len(), 1, "a real sentence start is still flagged");
+    }
 
     #[test]
     fn clean_turkish_text_produces_no_issues() {
