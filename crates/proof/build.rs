@@ -17,13 +17,13 @@ use std::path::{Path, PathBuf};
 /// (constant, path under `language-data/`, bytes rather than text).
 const FILES: &[(&str, &str, bool)] = &[
     ("EN_US_DIC", "en-us/en-us.dic", true),
-    ("EN_US_PAT", "en-us/en-us.pat", false),
+    ("EN_US_PAT", "en-us/hyphenation.pat", false),
     ("EXTRA_EN", "en-us/en-extra.txt", false),
     ("EN_VARIANTS", "en-us/en-variants.txt", false),
-    ("PL_PAT", "pl/pl.pat", false),
-    ("PT_PAT", "pt/pt.pat", false),
-    ("IT_PAT", "it/it.pat", false),
-    ("DE_PAT", "de/de.pat", false),
+    ("PL_PAT", "pl/hyphenation.pat", false),
+    ("PT_PAT", "pt/hyphenation.pat", false),
+    ("IT_PAT", "it/hyphenation.pat", false),
+    ("DE_PAT", "de/hyphenation.pat", false),
     ("EXTRA_RU", "ru/ru-extra.txt", false),
 ];
 
