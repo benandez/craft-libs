@@ -1164,16 +1164,20 @@ mod tests {
             let english = matches!(l, ProofLang::En | ProofLang::EnGb | ProofLang::EnCa);
             assert_eq!(dictionary_needed(l, false).is_some(), !english, "{l:?}");
         }
-        for l in [ProofLang::En, ProofLang::Bg, ProofLang::De, ProofLang::Other] {
+        for l in [ProofLang::En, ProofLang::Other] {
             assert_eq!(dictionary_needed(l, false), None);
         }
+        // German and Bulgarian spell from a pack or Hunspell dictionary, and name it as the others do.
+        assert_eq!((dictionary_needed(ProofLang::De, false), dictionary_needed(ProofLang::Bg, false)), (Some("de_DE"), Some("bg_BG")));
         // Installed dictionaries and the built-in English list: no hint.
         pl::test_dict::install();
         pt::test_dict::install();
         es::test_dict::install();
-        for tag in [Some("pl-PL"), Some("pt-BR"), Some("es-ES"), Some("es-MX"), Some("es-419"), Some("es-UY"), Some("en-US"), Some("fr-FR"), None] {
+        for tag in [Some("pl-PL"), Some("pt-BR"), Some("es-ES"), Some("es-MX"), Some("es-419"), Some("es-UY"), Some("en-US"), None] {
             assert_eq!(missing_dictionary(tag), None, "{tag:?}");
         }
+        // A pack language names its dictionary too, unless one is installed.
+        assert!(missing_dictionary(Some("fr-FR")).is_none_or(|n| n == "fr_FR"));
     }
 
     use super::*;
@@ -2249,6 +2253,20 @@ mod tests {
         assert_eq!(suggest_in("programmes", 5, us).first().map(String::as_str), Some("programs"));
     }
 
+    /// Does en-GB read a list with the British spellings: the Moby list (embedded or built in) or a
+    /// British Hunspell dictionary? Without the Language data, a machine with only a US Hunspell
+    /// dictionary (GitHub's Ubuntu runners) spells en-GB with it, by design, and marks `goitre`.
+    fn has_british_source() -> bool {
+        match english_source(ProofLang::EnGb) {
+            Some(EnglishSource::Embedded | EnglishSource::CoreList) => true,
+            Some(EnglishSource::Hunspell(dic)) => {
+                let stem = dic.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                !["en_US", "en-US", "en_CA", "en-CA"].contains(&stem.as_str())
+            }
+            None => false,
+        }
+    }
+
     /// More British spellings that must stay right in en-GB and en-AU (#1281): -re, single l, ae,
     /// with their inflections.
     #[test]
@@ -2257,6 +2275,9 @@ mod tests {
         let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let gb = ProofLang::EnGb;
         assert_eq!(ProofLang::from_tag(Some("en-AU")), gb);
+        if !has_british_source() {
+            return;
+        }
         for w in [
             "goitre",
             "goitres",
