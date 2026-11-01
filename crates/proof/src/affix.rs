@@ -941,6 +941,12 @@ impl AffixDict {
         self.check_except(w, self.no_suggest | self.substandard)
     }
 
+    /// Whether `w` is a word only through a `KEEPCASE` stem, so it is correct in this letter case
+    /// alone (`km` from `km/K`, which `Km` and `KM` are not).
+    pub(crate) fn case_locked(&self, w: &str) -> bool {
+        self.keepcase != Mask::EMPTY && self.contains(w) && !self.contains_except(&self.normalize(w), self.keepcase)
+    }
+
     fn check_except(&self, w: &str, deny: Mask) -> bool {
         let w = self.normalize(w);
         if self.contains_except(&w, deny) {

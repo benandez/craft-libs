@@ -297,11 +297,13 @@ pub(crate) fn suggest_in(d: &AffixDict, word: &str, max: usize, t: &Tuning) -> V
     found.sort_by_key(|(text, (cost, seq))| (*cost, diff_at(text), *seq));
     let mut out: Vec<String> = Vec::new();
     for (text, _) in found {
-        let t = match case {
+        let recased = match case {
             Casing::Initial => capitalize(&text),
             Casing::Upper if n > 1 => text.to_uppercase(),
-            _ => text,
+            _ => text.clone(),
         };
+        // A KEEPCASE word only exists in its dictionary case: `Km` would be flagged, so offer `km`.
+        let t = if recased != text && text.split(' ').any(|p| d.case_locked(p)) { text } else { recased };
         if t != word && !out.contains(&t) {
             out.push(t);
         }
@@ -519,6 +521,21 @@ mod tests {
         assert_eq!(weighted_distance(&c("kot"), &c("kotek"), &related, 9), 4);
         assert_eq!(weighted_distance(&c("kot"), &c("pies"), &related, 2), 3);
         assert_eq!(weighted_distance(&c(""), &c("ab"), &related, 9), 4);
+    }
+
+    /// A KEEPCASE word is offered in its dictionary case when the word's own case would be flagged
+    /// (`Kmm` → `km`, never `Km`), and a capitalised KEEPCASE word gets its dictionary form.
+    #[test]
+    fn keepcase_suggestions_are_not_recased_into_errors() {
+        let d = AffixDict::from_hunspell("KEEPCASE K\n", "2\nkm/K\npies\n", &[]).unwrap();
+        assert!(!d.check("Km") && !d.check("KM"));
+        for (word, want) in [("Kmm", "km"), ("KMM", "km"), ("Km", "km")] {
+            let got = suggest_in(&d, word, 4, &Tuning::DEFAULT);
+            assert!(got.iter().all(|s| s.split(' ').all(|p| d.check(p))), "{word}: {got:?}");
+            assert_eq!(got.first().map(String::as_str), Some(want), "{word}: {got:?}");
+        }
+        assert_eq!(suggest_in(&d, "Pies", 4, &Tuning::DEFAULT), Vec::<String>::new());
+        assert_eq!(suggest_in(&d, "Piesx", 4, &Tuning::DEFAULT).first().map(String::as_str), Some("Pies"));
     }
 
     /// A language's tables come after its dictionary's, a TRY alphabet stands in for a missing TRY
