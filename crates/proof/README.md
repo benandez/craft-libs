@@ -34,6 +34,12 @@ let fixes = suggest_in("colour", 5, ProofLang::En);
 let breaks = hyphen_points_in("hyphenation", &Limits::default(), ProofLang::En);
 ```
 
+Hunspell dictionaries are not bundled; they are read from, in order: the folder given to
+`set_dictionaries_folder`, `WORDCRAFT_DICTIONARIES`, WordCraft's own folder under the user's
+application data (`%LOCALAPPDATA%\WordCraft\dictionaries` and `%APPDATA%\WordCraft\dictionaries`,
+`~/Library/Application Support/WordCraft/dictionaries`, `$XDG_DATA_HOME/wordcraft/dictionaries`),
+then the usual Hunspell and LibreOffice locations. None on the web.
+
 State is process-wide: `add_word`, `ignore_word`, `set_dictionaries_folder`,
 `load_user_dictionary`/`save_user_dictionary`. The crate reads no document model; callers pass
 plain text and language spans.
@@ -87,6 +93,10 @@ cargo check -p craft-proof --target wasm32-unknown-unknown
 ```
 
 CI: `.github/workflows/proof.yml`.
+
+## Credits
+
+storytold/craft-libs#30/#31 by brzuchal (Michał Marcin Brzuchalski) started the shared crate.
 
 ## Owners
 
