@@ -327,8 +327,8 @@ pub fn dictionary_load_error(lang: ProofLang) -> Option<String> {
 /// Where the spelling of an English `lang` comes from now (`None` for other languages): the word
 /// list embedded at build time, else an English Hunspell dictionary from the dictionaries folder
 /// or the system (the run's English first), else the Moby word list built into the crate.
-/// British and Canadian English use an `en_US` Hunspell dictionary when no regional one is
-/// installed. Reads the Hunspell dictionary once when there is no
+/// Each English uses only its own Hunspell dictionary (`en_US`, `en_GB`, `en_CA`): without it,
+/// the built-in list, which has both spellings. Reads the Hunspell dictionary once when there is no
 /// embedded word list (it is cached afterwards).
 pub fn english_source(lang: ProofLang) -> Option<EnglishSource> {
     lang.is_english().then(|| english::source(lang))
@@ -460,6 +460,11 @@ pub fn save_user_dictionary(path: &std::path::Path, removed: &[String]) -> std::
 
 /// Common words the source list lacks (modern vocabulary, contractions).
 const COMMON: &str = "a an the and or but if of to in on at by for with from as is am are was were be been being it its we us our you your he him his she her they them their i me my mine this that these those there here what which who whom whose when where why how all any both each few more most other some such no nor not only own same so than too very can will just should now do does did done has have had having may might must shall would could up down out over under again further then once off into onto upon about above below between through during before after until while because per via vs etc ok yes yeah oh ah hi hey bye one two three four five six seven eight nine ten first last next new old get got go goes went gone see saw seen say said make made take took come came give gave know knew think thought look want need use used find found tell told ask asked feel felt try left keep let put mean set run show turn move live play pay hear hold bring begin seem help talk start might";
+
+/// Is `w` (lower case) one of [`COMMON`]'s words?
+pub(crate) fn is_common_word(w: &str) -> bool {
+    COMMON.split(' ').any(|c| c == w)
+}
 
 /// Our supplement of common words the Moby list lacks (`desktop`, `email`, `download`…): one
 /// lowercase base form per line, `#` comments. Inflections come from [`known_core`].
@@ -1236,9 +1241,17 @@ mod tests {
             assert!(!is_correct("hous") && is_correct("teh"), "the older English-only functions too");
             assert_eq!(check_spelling_in("teh hous", ProofLang::En).len(), 1);
             assert!(suggest_in("hous", 3, ProofLang::En).contains(&"house".to_string()), "{:?}", suggest_in("hous", 3, ProofLang::En));
-            // No en_GB or en_CA file: they use the en_US one (one copy, shared).
-            assert_eq!(english_source(ProofLang::EnGb), Some(EnglishSource::Hunspell(dic.clone())));
-            assert_eq!(english_source(ProofLang::EnCa), Some(EnglishSource::Hunspell(dic)));
+            // No en_GB or en_CA file: never the en_US one, which would mark their spellings
+            // (craft-libs#482 re-review), but their own installed elsewhere or the built-in list.
+            for lang in [ProofLang::EnGb, ProofLang::EnCa] {
+                assert_ne!(english_source(lang), Some(EnglishSource::Hunspell(dic.clone())), "{lang:?}");
+                if english_source(lang) == Some(EnglishSource::CoreList) {
+                    for w in ["colour", "organise", "favourite", "centre", "travelled", "because"] {
+                        assert!(is_correct_in(w, lang), "{w} {lang:?}");
+                    }
+                    assert!(!is_correct_in("becuase", lang), "{lang:?}");
+                }
+            }
         }
         // Text in a language without proofing is never checked with English.
         assert!(check_spelling_in("hous teh zxqv", ProofLang::Other).is_empty());
@@ -1280,31 +1293,38 @@ mod tests {
     }
 
     /// craft-libs#482 review: an English dictionary that can't be read is skipped for the next
-    /// name or folder, not for the built-in list; and a dictionary with compounding and output
-    /// conversion (as the usual en_US and en_GB ones have) is read, not refused.
+    /// name or folder of the same English, never for another English's; and a dictionary with
+    /// compounding and output conversion (as the usual en_US and en_GB ones have) is read. (Only
+    /// American English gets a dictionary that loads: the British tests don't hold the lock.)
     #[test]
-    fn english_tries_the_next_dictionary_and_reads_real_world_directives() {
+    fn english_tries_its_next_dictionary_and_reads_real_world_directives() {
         let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = std::env::temp_dir().join(format!("wc-proof-en-next-{}", std::process::id()));
+        let aff: &[u8] = b"SET UTF-8\nICONV 1\nICONV \xe2\x80\x99 '\nOCONV 1\nOCONV ' \xe2\x80\x99\nCOMPOUNDMIN 1\nONLYINCOMPOUND c\n\
+                  COMPOUNDRULE 1\nCOMPOUNDRULE n*1t\nSFX S Y 1\nSFX S 0 s .\n";
         let english: &[(&str, &[u8], &[u8])] = &[
+            ("en_US", b"SET SHIFT_JIS\n", b"1\ncolor\n"),
+            ("en-US", aff, b"5\nhouse/S\nthe\nqwzzy\nbecause\n1st/c\n"),
             ("en_GB", b"SET SHIFT_JIS\n", b"1\ncolour\n"),
-            (
-                "en_US",
-                b"SET UTF-8\nICONV 1\nICONV \xe2\x80\x99 '\nOCONV 1\nOCONV ' \xe2\x80\x99\nCOMPOUNDMIN 1\nONLYINCOMPOUND c\n\
-                  COMPOUNDRULE 1\nCOMPOUNDRULE n*1t\nSFX S Y 1\nSFX S 0 s .\n",
-                b"4\nhouse/S\nthe\nqwzzy\n1st/c\n",
-            ),
         ];
         folder_with_english(&dir, english);
         if !english_data() {
-            let us = dir.join("en_US.dic");
-            for lang in [ProofLang::En, ProofLang::EnGb, ProofLang::EnCa] {
-                assert_eq!(english_source(lang), Some(EnglishSource::Hunspell(us.clone())), "{lang:?}");
-                assert!(is_correct_in("qwzzy", lang) && is_correct_in("houses", lang) && !is_correct_in("because", lang), "{lang:?}");
+            let us = Some(EnglishSource::Hunspell(dir.join("en-US.dic")));
+            // A real en_US installed elsewhere (WORDCRAFT_DICTIONARIES, the system) comes first:
+            // the same name in every folder before the next name.
+            if english_source(ProofLang::En) == us {
+                assert!(is_correct_in("qwzzy", ProofLang::En) && is_correct_in("houses", ProofLang::En));
+                assert!(is_correct_in("because", ProofLang::En) && !is_correct_in("becuase", ProofLang::En) && !is_correct_in("hous", ProofLang::En));
             }
-            let error = dictionary_load_error(ProofLang::EnGb).unwrap_or_default();
-            assert!(error.contains("unsupported encoding"), "the en_GB file it would rather use is reported: {error}");
-            assert_eq!(dictionary_load_error(ProofLang::En), None);
+            for lang in [ProofLang::En, ProofLang::EnGb, ProofLang::EnCa] {
+                let source = english_source(lang);
+                assert!(source == us || !matches!(&source, Some(EnglishSource::Hunspell(p)) if p.starts_with(&dir)), "{lang:?}: {source:?}");
+            }
+            assert_ne!(english_source(ProofLang::EnGb), us, "never another English's dictionary");
+            for lang in [ProofLang::En, ProofLang::EnGb] {
+                let error = dictionary_load_error(lang).unwrap_or_default();
+                assert!(error.contains("unsupported encoding"), "{lang:?}: the file it would rather use is reported: {error}");
+            }
         }
         drop_english_files(&dir, english);
     }

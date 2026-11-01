@@ -145,14 +145,20 @@ pub fn find(names: &[&str]) -> Option<(PathBuf, PathBuf)> {
     search_dirs(lo.as_deref()).into_iter().find_map(|dir| find_in(&dir, names))
 }
 
-/// Every `<name>.aff`/`<name>.dic` pair for `names`, in the order [`find`] prefers them: folder
-/// by folder ([`search_dirs`]), each folder's in the order of `names`. A caller that can't read
-/// one tries the next.
+/// Every `<name>.aff`/`<name>.dic` pair for `names`, name by name, each in every folder
+/// ([`search_dirs`], the dictionaries folder first): a file with the first name in a system
+/// folder comes before one with the second name in the dictionaries folder. A caller that can't
+/// read one tries the next.
 pub fn candidates(names: &[&str]) -> Vec<(PathBuf, PathBuf)> {
     let lo = names.first().copied().map(lo_ext_dirs);
+    candidates_in(&search_dirs(lo.as_deref()), names)
+}
+
+/// [`candidates`] in `dirs`.
+pub fn candidates_in(dirs: &[PathBuf], names: &[&str]) -> Vec<(PathBuf, PathBuf)> {
     let mut out: Vec<(PathBuf, PathBuf)> = Vec::new();
-    for dir in search_dirs(lo.as_deref()) {
-        for n in names {
+    for n in names {
+        for dir in dirs {
             let aff = dir.join(format!("{n}.aff"));
             let dic = dir.join(format!("{n}.dic"));
             if aff.is_file() && dic.is_file() && !out.iter().any(|(_, d)| *d == dic) {
@@ -716,6 +722,26 @@ mod tests {
         let dirs = search_dirs(Some(&super::lo_ext_dirs("pt_BR")));
         assert!(dirs.iter().any(|d| d.ends_with("dict-pt-BR")), "{dirs:?}");
         assert!(search_dirs(None).iter().all(|d| !d.to_string_lossy().contains("dict-")), "no language: no LibreOffice guess");
+    }
+
+    /// craft-libs#482 re-review: a name is looked for in every folder before the next name, so
+    /// an `en_US` in the dictionaries folder doesn't beat a system `en_GB` for British English.
+    #[test]
+    fn candidates_go_name_by_name_across_the_folders() {
+        let base = std::env::temp_dir().join(format!("wordcraft-candidates-{}", std::process::id()));
+        let (folder, system) = (base.join("folder"), base.join("system"));
+        for (dir, name) in [(&folder, "en_US"), (&system, "en_GB"), (&folder, "en-GB")] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(format!("{name}.aff")), "SET UTF-8\n").unwrap();
+            std::fs::write(dir.join(format!("{name}.dic")), "1\nx\n").unwrap();
+        }
+        let dirs = [folder.clone(), system.clone()];
+        let dics: Vec<PathBuf> = candidates_in(&dirs, &["en_GB", "en-GB"]).into_iter().map(|(_, d)| d).collect();
+        assert_eq!(dics, vec![system.join("en_GB.dic"), folder.join("en-GB.dic")]);
+        let us: Vec<PathBuf> = candidates_in(&dirs, &["en_US", "en_GB"]).into_iter().map(|(_, d)| d).collect();
+        assert_eq!(us, vec![folder.join("en_US.dic"), system.join("en_GB.dic")]);
+        assert!(candidates_in(&dirs, &["en_CA"]).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

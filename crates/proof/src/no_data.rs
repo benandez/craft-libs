@@ -60,7 +60,8 @@ fn english_spelling_still_marks_misspellings() {
     let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     for l in [ProofLang::En, ProofLang::EnGb, ProofLang::EnCa] {
         assert!(matches!(crate::english_source(l), Some(EnglishSource::Hunspell(_) | EnglishSource::CoreList)), "{l:?}");
-        assert!(!crate::is_correct_in("becuase", l), "{l:?}");
+        assert!(!crate::is_correct_in("becuase", l) && !crate::is_correct_in("teh", l), "{l:?}");
+        assert!(crate::suggest_in("teh", 5, l).contains(&"the".to_string()), "{l:?}");
         assert!(crate::suggest_in("becuase", 5, l).contains(&"because".to_string()), "{l:?}");
         for w in ["the", "The", "house", "houses", "because", "running", "people", "beautiful", "don't"] {
             assert!(crate::is_correct_in(w, l), "{w} {l:?}");

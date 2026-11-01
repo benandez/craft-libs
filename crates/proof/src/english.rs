@@ -2,14 +2,15 @@
 //!
 //! 1. **Embedded**: the Moby word list embedded from craft-i18n at build time (`CRAFT_I18N_DIR`,
 //!    see `build.rs`). When it is there, nothing in this module is used.
-//! 2. **System Hunspell**: an English Hunspell `.aff`/`.dic` pair found by [`crate::hunspell`]
-//!    (the dictionaries folder first, then the system locations; none on the web). The run's
-//!    English is tried first (`en_US`, `en_GB`, `en_CA`…), then the other Englishes: a full
-//!    dictionary in the other spelling marks fewer right words than none. So British and Canadian
-//!    English use an `en_US` dictionary when no regional one is installed (and American English
-//!    an `en_GB` one). A file that can't be read is skipped for the next name or folder, and one
-//!    file is read once for every English that uses it. Directives that only matter for other
-//!    languages (compounding, output conversion) are ignored ([`crate::hunspell::load_english`]).
+//! 2. **System Hunspell**: a Hunspell `.aff`/`.dic` pair for the run's own English found by
+//!    [`crate::hunspell`] (`en_US` for American, `en_GB` for British, `en_CA` for Canadian
+//!    English; each name in the dictionaries folder and then the system locations before the
+//!    next name; none on the web). Another English's dictionary is never used: it would mark this
+//!    English's spellings (`colour` in an `en_US` one), so without its own dictionary an English
+//!    uses the built-in list, which has both spellings. A file that can't be read is skipped for
+//!    the next name or folder, and one file is read once for every English that uses it.
+//!    Directives that only matter for other languages (compounding, output conversion) are
+//!    ignored ([`crate::hunspell::load_english`]).
 //! 3. **Built-in word list**: [`WORDS`], the whole public-domain Moby word list compiled into
 //!    the crate (without its break points), with WordCraft's own supplement of modern words
 //!    ([`EXTRA`]) and the usual inflections. A word it doesn't know is misspelled, as with the
@@ -71,12 +72,13 @@ pub(crate) fn word_list_contains(w: &str) -> bool {
     words().get(w).is_some()
 }
 
-/// Hunspell file names to look for, the run's English first.
+/// Hunspell file names of `lang`'s own dictionary, the usual one first. Only its own: another
+/// English's dictionary would mark its spellings, which the built-in list doesn't.
 fn names(lang: ProofLang) -> &'static [&'static str] {
     match lang {
-        ProofLang::EnGb => &["en_GB", "en-GB", "en_AU", "en_NZ", "en_IE", "en_ZA", "en_IN", "en", "en_CA", "en_US", "en-US"],
-        ProofLang::EnCa => &["en_CA", "en-CA", "en", "en_US", "en-US", "en_GB", "en-GB"],
-        _ => &["en_US", "en-US", "en", "en_CA", "en_GB", "en-GB", "en_AU"],
+        ProofLang::EnGb => &["en_GB", "en-GB"],
+        ProofLang::EnCa => &["en_CA", "en-CA"],
+        _ => &["en_US", "en-US"],
     }
 }
 
@@ -130,13 +132,14 @@ fn hunspell(lang: ProofLang) -> Loaded {
         }
         s.reloads
     };
-    keep(&HUNSPELL, i, reloads, load(lang))
+    let (loaded, error) = load(lang);
+    keep(&HUNSPELL, i, reloads, loaded, || note_error(lang, error))
 }
 
-/// Keep in `state` what the load of slot `i`, started after `reloads` reloads, found. If the
-/// folder was reloaded since, the load may have read the old folder: it serves this one check and
-/// the next one loads again.
-fn keep(state: &RwLock<State>, i: usize, reloads: u64, loaded: Loaded) -> Loaded {
+/// Keep in `state` what the load of slot `i`, started after `reloads` reloads, found, and `note`
+/// its load error. If the folder was reloaded since, the load may have read the old folder: it
+/// serves this one check, its error isn't noted, and the next check loads again.
+fn keep(state: &RwLock<State>, i: usize, reloads: u64, loaded: Loaded, note: impl FnOnce()) -> Loaded {
     let mut s = state.write().unwrap_or_else(PoisonError::into_inner);
     if s.reloads != reloads {
         return match s.slots.get(i) {
@@ -144,6 +147,7 @@ fn keep(state: &RwLock<State>, i: usize, reloads: u64, loaded: Loaded) -> Loaded
             _ => loaded,
         };
     }
+    note();
     let loaded = loaded.map(|(d, dic)| {
         // Another English may have read the same file meanwhile: share its copy.
         let d = match s.files.iter().find(|(p, _)| *p == dic) {
@@ -180,19 +184,16 @@ fn key(lang: ProofLang) -> &'static str {
     names(lang).first().copied().unwrap_or("en_US")
 }
 
-/// Read the first English Hunspell pair for `lang` that loads, trying each name in each folder
-/// ([`crate::hunspell::candidates`]). The first failure before it (the file `lang` would rather
-/// use) is reported for `lang`.
-fn load(lang: ProofLang) -> Loaded {
-    let key = key(lang);
+/// Read the first Hunspell pair of `lang`'s own that loads, trying each name in each folder
+/// ([`crate::hunspell::candidates`]), with the first failure before it (the file `lang` would
+/// rather use), for [`note_error`].
+fn load(lang: ProofLang) -> (Loaded, Option<(PathBuf, String)>) {
     let candidates = crate::hunspell::candidates(names(lang));
     if candidates.is_empty() {
-        crate::hunspell::clear_load_error(key);
-        log::info!("English spelling: no Hunspell English dictionary installed; using the built-in word list");
-        return None;
+        log::info!("English spelling: no Hunspell {} dictionary installed; using the built-in word list", key(lang));
+        return (None, None);
     }
     let mut first_error: Option<(PathBuf, String)> = None;
-    let mut found = None;
     for (aff, dic) in candidates.into_iter().take(MAX_CANDIDATES) {
         let loaded = match already_read(&HUNSPELL, &dic) {
             Some(d) => Ok(d),
@@ -201,32 +202,34 @@ fn load(lang: ProofLang) -> Loaded {
                 .map(Arc::new),
         };
         match loaded {
-            Ok(d) => {
-                found = Some((d, dic));
-                break;
-            }
+            Ok(d) => return (Some((d, dic)), first_error),
             Err(e) => {
                 log::warn!("English spelling: {e}; trying the next dictionary");
                 first_error.get_or_insert((dic, e));
             }
         }
     }
-    match first_error {
+    log::warn!("English spelling: no {} Hunspell dictionary could be read; using the built-in word list", key(lang));
+    (None, first_error)
+}
+
+/// Remember `lang`'s load error ([`crate::dictionary_load_error`]), or that it has none.
+fn note_error(lang: ProofLang, error: Option<(PathBuf, String)>) {
+    match error {
         Some((dic, e)) => {
-            let _ = crate::hunspell::note_load::<()>(key, &dic, Err(e));
+            let _ = crate::hunspell::note_load::<()>(key(lang), &dic, Err(e));
         }
-        None => crate::hunspell::clear_load_error(key),
+        None => crate::hunspell::clear_load_error(key(lang)),
     }
-    if found.is_none() {
-        log::warn!("English spelling: no English Hunspell dictionary could be read; using the built-in word list");
-    }
-    found
 }
 
 /// Forget the loaded dictionaries, so the next check looks for them again (the dictionaries
 /// folder changed).
 pub(crate) fn reload() {
     forget(&HUNSPELL);
+    for lang in [ProofLang::En, ProofLang::EnGb, ProofLang::EnCa] {
+        crate::hunspell::clear_load_error(key(lang));
+    }
 }
 
 /// Where the spelling of `lang` (an English) comes from now. Reads the Hunspell dictionary once
@@ -294,11 +297,38 @@ pub(crate) fn suggest(word: &str, max: usize, lang: ProofLang) -> Vec<String> {
 /// Letters an edit may add or put in a word's place.
 const ALPHABET: &str = "abcdefghijklmnopqrstuvwxyz'";
 
+/// Are `a` and `b` neighbouring keys on a QWERTY keyboard? (A typing slip: `wprd` for `word`.)
+fn neighbour_keys(a: char, b: char) -> bool {
+    const ROWS: [&str; 3] = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
+    // Each row sits half a key right of the one above: x in half keys.
+    let at = |c: char| ROWS.iter().enumerate().find_map(|(r, row)| row.find(c).map(|col| (r as i64, 2 * col as i64 + r as i64)));
+    match (at(a), at(b)) {
+        (Some((ra, xa)), Some((rb, xb))) => (ra == rb && (xa - xb).abs() == 2) || ((ra - rb).abs() == 1 && (xa - xb).abs() <= 1),
+        _ => false,
+    }
+}
+
+/// A suggestion's rank, lowest first: not a swap, not a common word, not a neighbouring key, not
+/// the same first letter, the difference in length.
+type Rank = (bool, bool, bool, bool, usize);
+
+/// How an edit changed the word, for ranking.
+#[derive(Clone, Copy)]
+enum Edit {
+    /// Two neighbouring letters swapped.
+    Swap,
+    /// One letter changed from the first to the second.
+    Change(char, char),
+    /// One letter added or missing.
+    Other,
+}
+
 /// Suggestions from the built-in word list: the words one edit away (two neighbouring letters
 /// swapped, one letter missing, added or changed), looked up in the list rather than compared
 /// with every word, so the cost is bounded by the word's length (at most
-/// [`MAX_SUGGEST_CHARS`]). Swaps first (`hte` → `the` and `het` before `hate`), then words with the same
-/// first letter, then the nearest in length.
+/// [`MAX_SUGGEST_CHARS`]). Ranked: swaps first (`recieve` → `receive`), then the common words
+/// (`hte` → `the` before `het`), a letter changed to a neighbouring key's, the same first letter,
+/// the nearest in length. One-letter words other than `a` and `I` are never suggested.
 fn list_suggest(word: &str, max: usize) -> Vec<String> {
     let lower = word.to_lowercase().replace('’', "'");
     let target: Vec<char> = lower.chars().collect();
@@ -306,40 +336,48 @@ fn list_suggest(word: &str, max: usize) -> Vec<String> {
     if max == 0 || n == 0 || n > MAX_SUGGEST_CHARS {
         return Vec::new();
     }
-    let mut found: Vec<(bool, bool, usize, String)> = Vec::new();
+    let mut found: Vec<(Rank, String)> = Vec::new();
     let mut tried = std::collections::HashSet::new();
-    let mut consider = |c: Vec<char>, swap: bool| {
+    let mut consider = |c: Vec<char>, edit: Edit| {
         let s: String = c.iter().collect();
-        if s != lower && tried.insert(s.clone()) && crate::known_in_word_list(&s) {
-            found.push((!swap, c.first() != target.first(), c.len().abs_diff(n), s));
+        if (c.len() < 2 && !matches!(s.as_str(), "a" | "i")) || s == lower || !tried.insert(s.clone()) || !crate::known_in_word_list(&s) {
+            return;
         }
+        let key = (
+            !matches!(edit, Edit::Swap),
+            !crate::is_common_word(&s),
+            !matches!(edit, Edit::Change(from, to) if neighbour_keys(from, to)),
+            c.first() != target.first(),
+            c.len().abs_diff(n),
+        );
+        found.push((key, s));
     };
     for i in 1..n {
         let mut c = target.clone();
         c.swap(i - 1, i);
-        consider(c, true);
+        consider(c, Edit::Swap);
     }
     for i in 0..n {
         let mut c = target.clone();
         c.remove(i);
-        consider(c, false);
+        consider(c, Edit::Other);
     }
     for i in 0..=n {
         for a in ALPHABET.chars() {
-            if i < n {
+            if let Some(&from) = target.get(i) {
                 let mut c = target.clone();
                 if let Some(l) = c.get_mut(i) {
                     *l = a;
                 }
-                consider(c, false);
+                consider(c, Edit::Change(from, a));
             }
             let mut c = target.clone();
             c.insert(i, a);
-            consider(c, false);
+            consider(c, Edit::Other);
         }
     }
     found.sort();
-    found.into_iter().take(max).map(|(_, _, _, w)| crate::match_case(word, w)).collect()
+    found.into_iter().take(max).map(|(_, w)| crate::match_case(word, w)).collect()
 }
 
 #[cfg(test)]
@@ -378,6 +416,8 @@ mod tests {
             "budget",
             "phone",
             "people's",
+            "wont",
+            "cant",
             // WordCraft's supplement.
             "login",
             "blog",
@@ -386,7 +426,8 @@ mod tests {
         ] {
             assert!(list_correct(w), "{w} is not marked");
         }
-        for w in ["recieved", "definately", "seperate", "ocurred", "becuase", "peopel", "beautifull", "zxqv", "Jarndycey"] {
+        for w in ["teh", "Teh", "abd", "ur", "recieved", "definately", "seperate", "ocurred", "becuase", "peopel", "beautifull", "zxqv", "Jarndycey"]
+        {
             assert!(!list_correct(w), "{w} is marked");
         }
         assert!(!list_correct("well-knwon"), "each part of a compound is checked");
@@ -396,9 +437,13 @@ mod tests {
     fn built_in_list_suggests_one_edit_away() {
         assert_eq!(list_suggest("becuase", 3).first().map(String::as_str), Some("because"));
         assert_eq!(list_suggest("Becuase", 3).first().map(String::as_str), Some("Because"));
-        assert!(list_suggest("hte", 3).contains(&"the".to_string()), "{:?}", list_suggest("hte", 3));
+        assert_eq!(list_suggest("hte", 3).first().map(String::as_str), Some("the"));
+        assert_eq!(list_suggest("recieve", 3).first().map(String::as_str), Some("receive"));
+        assert_eq!(list_suggest("wprd", 3).first().map(String::as_str), Some("word"), "a neighbouring key");
+        assert!(list_suggest("é", 5).iter().all(|s| s.chars().count() > 1 || s == "a" || s == "i"), "{:?}", list_suggest("é", 5));
+        assert!(list_suggest("x", 5).iter().all(|s| s.chars().count() > 1 || s == "a" || s == "i"), "{:?}", list_suggest("x", 5));
+        assert!(!neighbour_keys('q', 's') && neighbour_keys('q', 'a') && neighbour_keys('o', 'p') && !neighbour_keys('é', 'e'));
         assert!(list_suggest("definately", 5).contains(&"definitely".to_string()));
-        assert!(list_suggest("recieve", 5).contains(&"receive".to_string()));
         assert!(list_suggest("", 5).is_empty() && list_suggest("becuase", 0).is_empty());
         assert!(list_suggest(&"a".repeat(MAX_SUGGEST_CHARS + 1), 5).is_empty());
     }
@@ -421,17 +466,20 @@ mod tests {
     #[test]
     fn a_load_from_before_a_reload_is_not_kept() {
         let state = RwLock::new(State::new());
+        let noted = std::cell::Cell::new(false);
         let dict = || Arc::new(AffixDict::from_hunspell("", "1\nzzyzx\n", &[]).unwrap());
         let file = PathBuf::from("/old/folder/en_US.dic");
         let before = state.read().unwrap().reloads;
         forget(&state); // The folder changes while the load runs.
-        let got = keep(&state, slot(ProofLang::En), before, Some((dict(), file.clone())));
+        let got = keep(&state, slot(ProofLang::En), before, Some((dict(), file.clone())), || noted.set(true));
         assert_eq!(got.map(|(_, p)| p), Some(file.clone()), "the stale load still answers its own check");
         assert!(state.read().unwrap().slots.iter().all(Option::is_none), "but it isn't kept");
+        assert!(!noted.get(), "nor is its load error");
         assert!(already_read(&state, &file).is_none());
         let now = state.read().unwrap().reloads;
-        let a = keep(&state, slot(ProofLang::En), now, Some((dict(), file.clone()))).unwrap();
-        let b = keep(&state, slot(ProofLang::EnGb), now, Some((dict(), file.clone()))).unwrap();
+        let a = keep(&state, slot(ProofLang::En), now, Some((dict(), file.clone())), || noted.set(true)).unwrap();
+        assert!(noted.get());
+        let b = keep(&state, slot(ProofLang::EnGb), now, Some((dict(), file.clone())), || {}).unwrap();
         assert!(Arc::ptr_eq(&a.0, &b.0), "one copy of a file for every English that reads it");
         assert!(already_read(&state, &file).is_some());
         forget(&state);
