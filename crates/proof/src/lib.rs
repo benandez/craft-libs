@@ -1585,6 +1585,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Review of #485: licence texts are read up to a total, however many packs hold big files.
+    #[test]
+    fn licence_texts_are_capped_in_all() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let root = std::env::temp_dir().join(format!("wc-proof-licence-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let big = vec![b'x'; 4 << 20];
+        for l in ["qa", "qb", "qc", "qd", "qe"] {
+            let dir = write_pack(&root, l, &[]);
+            std::fs::write(dir.join("LICENCES").join("BIG"), &big).unwrap();
+        }
+        packs::set_packs_dir(Some(root.clone()));
+        let from_packs: usize = packs::licence_texts().iter().filter(|(t, _)| t.contains(": BIG")).map(|(_, x)| x.len()).sum();
+        assert!(from_packs > 0 && from_packs <= 16 << 20, "{from_packs}");
+        packs::set_packs_dir(None);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Pack languages for the cache tests: `qa`, `qb`… each knowing `word<locale>`.
     fn many_packs(root: &std::path::Path, n: usize) -> Vec<ProofLang> {
         (0..n)

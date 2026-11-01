@@ -174,9 +174,13 @@ impl ProofLang {
         matches!(self, ProofLang::Es | ProofLang::EsMx | ProofLang::Es419 | ProofLang::EsUy)
     }
 
-    /// The primary language subtag (`en`, `pl`, `bg`, `tr`, `ru`, `cs`, `id`, `de`, `es`); empty for [`ProofLang::Other`].
+    /// The primary language subtag (`en`, `pl`, `bg`, `tr`, `ru`, `cs`, `id`, `de`, `es`); empty for
+    /// [`ProofLang::Other`] and for a [`ProofLang::Pack`] language, whose locale isn't `'static`:
+    /// use [`ProofLang::pack_locale`] (`PackLocale::as_str`) for it. Kept `'static` so existing
+    /// callers (`PROOFED.map(ProofLang::code)`) don't break.
     pub fn code(self) -> &'static str {
         match self {
+            ProofLang::Pack(_) => "",
             ProofLang::En | ProofLang::EnGb | ProofLang::EnCa => "en",
             ProofLang::Pl => "pl",
             ProofLang::Bg => "bg",
@@ -189,7 +193,7 @@ impl ProofLang {
             ProofLang::Id => "id",
             ProofLang::Es | ProofLang::EsMx | ProofLang::Es419 | ProofLang::EsUy => "es",
             ProofLang::De => "de",
-            ProofLang::Pack(_) | ProofLang::Other => "",
+            ProofLang::Other => "",
         }
     }
 
@@ -480,7 +484,7 @@ mod tests {
         for tag in ["fr-FR", "dex", "ja-JP", "plx", "bgx", "trx", "csx", "idx", "inx", "esx", "spax"] {
             let lang = ProofLang::from_tag(Some(tag));
             assert_eq!(lang.pack_locale().map(|l| l.to_string()), Some(tag.to_ascii_lowercase()), "{tag}");
-            assert_eq!(lang.code(), "", "{tag}");
+            assert_eq!(lang.code(), "", "{tag}: a pack language's locale is pack_locale()");
         }
         assert_tags(&["x-none", "e", "-", "und", "zxx", "i-klingon"], ProofLang::Other);
     }

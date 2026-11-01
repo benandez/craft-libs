@@ -150,13 +150,22 @@ pub fn licence_texts() -> Vec<(String, String)> {
     }
     out.push(("English core word list".into(), CORE_LIST_NOTICE.into()));
     out.extend(crate::data::EMBEDDED_LICENCES.iter().map(|(t, x)| ((*t).to_string(), (*x).to_string())));
-    for (p, _) in &scan().packs {
+    let mut total: u64 = 0;
+    'packs: for (p, _) in &scan().packs {
         for (file, text) in licence_files(&p.path) {
+            total = total.saturating_add(text.len() as u64);
+            if total > MAX_LICENCE_TOTAL {
+                log::warn!("Language pack licences: over {MAX_LICENCE_TOTAL} bytes in all; the rest aren't shown");
+                break 'packs;
+            }
             out.push((format!("{} ({}): {file}", p.name, p.locale), text));
         }
     }
     out
 }
+
+/// Most bytes of pack licence text [`licence_texts`] reads in all.
+const MAX_LICENCE_TOTAL: u64 = 16 << 20;
 
 /// The notice of the embedded Moby word list (craft-i18n `language-data/en-us/en-us.dic`).
 const MOBY_NOTICE: &str = "The Moby Hyphenator II word list by Grady Ward (Project Gutenberg eBook #3204) is in the public domain. \
@@ -263,8 +272,24 @@ fn parse_pack_toml(text: &str) -> Result<PackInfo, String> {
         return Err(format!("pack.toml: {locale:?} isn't a lowercase language tag"));
     }
     let licence = string("licence").or_else(|| string("license")).filter(|l| !l.trim().is_empty()).ok_or("pack.toml: no licence")?;
-    let name = string("name").filter(|n| !n.trim().is_empty() && n.chars().count() <= 200 && !n.chars().any(char::is_control));
+    let name = string("name").map(|n| plain_text(&n)).filter(|n| !n.is_empty());
     Ok(PackInfo { locale, name, licence: licence.chars().take(200).collect() })
+}
+
+/// Text from a pack shown to people (its name): without control, bidirectional or other format
+/// characters (U+202E would reverse what follows), trimmed, at most 200 characters.
+pub(crate) fn plain_text(s: &str) -> String {
+    s.chars().filter(|&c| !c.is_control() && !is_format(c)).take(200).collect::<String>().trim().to_string()
+}
+
+/// Unicode format characters (general category Cf): bidirectional controls, zero-width ones,
+/// the soft hyphen, tags.
+fn is_format(c: char) -> bool {
+    matches!(c,
+        '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}' | '\u{890}'..='\u{891}' | '\u{8e2}' | '\u{180e}'
+        | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' | '\u{feff}'
+        | '\u{fff9}'..='\u{fffb}' | '\u{110bd}' | '\u{110cd}' | '\u{13430}'..='\u{1343f}' | '\u{1bca0}'..='\u{1bca3}'
+        | '\u{1d173}'..='\u{1d17a}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}')
 }
 
 /// Deepest nesting of tables and arrays checked in `pack.toml` (deeper is refused).
@@ -486,6 +511,15 @@ fn load_patterns(path: &Path) -> Result<Patterns, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review of #485: a pack's name loses bidirectional and other format characters.
+    #[test]
+    fn pack_names_are_plain_text() {
+        let t = "locale = \"nl\"\nlicence = \"MIT\"\nname = \"Neder\\u202elands\\u200b\\u2066 \\u0007\"\n";
+        assert_eq!(parse_pack_toml(t).unwrap().name.as_deref(), Some("Nederlands"));
+        let t = "locale = \"nl\"\nlicence = \"MIT\"\nname = \"\\u202e\\u200f\"\n";
+        assert_eq!(parse_pack_toml(t).unwrap().name, None, "nothing left: the locale is shown");
+    }
 
     #[test]
     fn locales_are_lowercase_tags() {
