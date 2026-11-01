@@ -199,6 +199,15 @@ fn ordered(names: &[&str], dirs: &[PathBuf], region_packs: &[PathBuf], system: &
     out
 }
 
+/// [`candidates`] without another region's or dialect's dictionary: the dictionaries folders,
+/// then an installed pack named exactly by one of `names` (`en_GB` → `en-gb`), then the system's
+/// folders, `names` only. English uses it: en-GB never falls back to an `en_US` file or pack.
+pub fn candidates_exact(names: &[&str]) -> Vec<(PathBuf, PathBuf)> {
+    let lo = names.first().copied().map(lo_ext_dirs);
+    let (dirs, system) = search_tiers(lo.as_deref());
+    ordered(names, &dirs, &crate::packs::exact_spelling_dirs(names), &system, &[])
+}
+
 /// [`candidates`] in the folders the user keeps dictionaries in for WordCraft ([`user_dirs`])
 /// only, not the system locations.
 pub fn user_candidates(names: &[&str]) -> Vec<(PathBuf, PathBuf)> {

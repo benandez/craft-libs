@@ -468,6 +468,25 @@ pub(crate) fn spelling_dirs(names: &[&str]) -> (Vec<PathBuf>, Vec<PathBuf>) {
     all.into_iter().partition(in_region)
 }
 
+/// The folders of the installed packs with a spelling dictionary whose locale is exactly one of
+/// `names` (`en_GB` → `en-gb`), in that order: no other region, no language alone.
+pub(crate) fn exact_spelling_dirs(names: &[&str]) -> Vec<PathBuf> {
+    if read().dir.is_none() {
+        return Vec::new();
+    }
+    let scan = scan();
+    let mut out: Vec<PathBuf> = Vec::new();
+    for n in names {
+        let l = n.to_ascii_lowercase().replace('_', "-");
+        if let Some((p, _)) = scan.packs.iter().find(|(p, h)| h.spelling && p.locale == l)
+            && !out.contains(&p.path)
+        {
+            out.push(p.path.clone());
+        }
+    }
+    out
+}
+
 /// The pack locales of `names`' own region: the first name's (`pt_BR` → `pt-br`) and the language
 /// alone (`pt`) when it is written in the same script.
 pub(crate) fn region_locales(names: &[&str]) -> Vec<String> {

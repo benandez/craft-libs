@@ -1321,6 +1321,10 @@ mod tests {
     /// installed English Language pack, then the system's Hunspell, then the built-in list.
     #[test]
     fn an_english_pack_comes_after_the_dictionaries_folder() {
+        // With SCOWL embedded, English reads only the dictionaries folder before it.
+        if scowl_embedded() {
+            return;
+        }
         let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         set_dictionaries_folder(Some(shared_test_folder()));
         let root = std::env::temp_dir().join(format!("wc-proof-en-pack-{}", std::process::id()));
@@ -1328,24 +1332,24 @@ mod tests {
         let (dir, packs) = (root.join("dictionaries"), root.join("language-packs"));
         let aff: &[u8] = b"SET UTF-8\nSFX S Y 1\nSFX S 0 s .\n";
         let pack = write_pack(&packs, "en-us", &[("spelling.aff", aff), ("spelling.dic", b"2\nzzpackword\nhouse/S\n")]);
+        let gb_pack = write_pack(&packs, "en-gb", &[("spelling.aff", aff), ("spelling.dic", b"2\nzzgbword\nhouse/S\n")]);
         packs::set_packs_dir(Some(packs.clone()));
         let english: &[(&str, &[u8], &[u8])] = &[("en_US", aff, b"2\nzzfolderword\nhouse/S\n")];
         folder_with_english(&dir, english);
-        if english_data() {
-            assert_eq!(english_source(ProofLang::En), Some(EnglishSource::Embedded));
-        } else {
-            assert_eq!(english_source(ProofLang::En), Some(EnglishSource::Hunspell(dir.join("en_US.dic"))), "the folder first");
-            assert!(is_correct_in("zzfolderword", ProofLang::En) && !is_correct_in("zzpackword", ProofLang::En));
-        }
+        assert_eq!(english_source(ProofLang::En), Some(EnglishSource::Hunspell(dir.join("en_US.dic"))), "the folder first");
+        assert!(is_correct_in("zzfolderword", ProofLang::En) && !is_correct_in("zzpackword", ProofLang::En));
+        // Each English its own: the folder's en_US never stands in for en-GB, which takes its pack.
+        assert_eq!(english_source(ProofLang::EnGb), Some(EnglishSource::Hunspell(gb_pack.join("spelling.dic"))));
         drop_english_files(&dir, english);
-        if !english_data() {
-            assert_eq!(english_source(ProofLang::En), Some(EnglishSource::Hunspell(pack.join("spelling.dic"))), "then the pack");
-            assert!(is_correct_in("zzpackword", ProofLang::En) && is_correct_in("houses", ProofLang::En));
-        }
+        assert_eq!(english_source(ProofLang::En), Some(EnglishSource::Hunspell(pack.join("spelling.dic"))), "then the pack");
+        assert!(is_correct_in("zzpackword", ProofLang::En) && is_correct_in("houses", ProofLang::En));
+        // Neither English takes the other dialect's pack: without its own, en-CA has none.
+        std::fs::remove_dir_all(&gb_pack).unwrap();
+        packs::reload();
+        assert_ne!(english_source(ProofLang::EnGb), Some(EnglishSource::Hunspell(pack.join("spelling.dic"))), "never en-us for en-GB");
+        assert_ne!(english_source(ProofLang::EnCa), Some(EnglishSource::Hunspell(pack.join("spelling.dic"))), "never en-us for en-CA");
         packs::set_packs_dir(None);
-        if !english_data() {
-            assert_ne!(english_source(ProofLang::En), Some(EnglishSource::Hunspell(pack.join("spelling.dic"))), "a removed pack is not used");
-        }
+        assert_ne!(english_source(ProofLang::En), Some(EnglishSource::Hunspell(pack.join("spelling.dic"))), "a removed pack is not used");
         set_dictionaries_folder(Some(shared_test_folder()));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2253,20 +2257,6 @@ mod tests {
         assert_eq!(suggest_in("programmes", 5, us).first().map(String::as_str), Some("programs"));
     }
 
-    /// Does en-GB read a list with the British spellings: the Moby list (embedded or built in) or a
-    /// British Hunspell dictionary? Without the Language data, a machine with only a US Hunspell
-    /// dictionary (GitHub's Ubuntu runners) spells en-GB with it, by design, and marks `goitre`.
-    fn has_british_source() -> bool {
-        match english_source(ProofLang::EnGb) {
-            Some(EnglishSource::Embedded | EnglishSource::CoreList) => true,
-            Some(EnglishSource::Hunspell(dic)) => {
-                let stem = dic.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                !["en_US", "en-US", "en_CA", "en-CA"].contains(&stem.as_str())
-            }
-            None => false,
-        }
-    }
-
     /// More British spellings that must stay right in en-GB and en-AU (#1281): -re, single l, ae,
     /// with their inflections.
     #[test]
@@ -2275,9 +2265,6 @@ mod tests {
         let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let gb = ProofLang::EnGb;
         assert_eq!(ProofLang::from_tag(Some("en-AU")), gb);
-        if !has_british_source() {
-            return;
-        }
         for w in [
             "goitre",
             "goitres",
