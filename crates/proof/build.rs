@@ -4,8 +4,9 @@
 //! one constant per file in [`FILES`], each an `include_str!`/`include_bytes!` of
 //! `$CRAFT_I18N_DIR/language-data/<path>`. Unset, or not a checkout, or a file missing (a warning):
 //! that constant is empty, and the crate has no embedded Language data for it (English spelling
-//! marks nothing, hyphenation that needs the data is off). With `CRAFT_I18N_REQUIRED=1` (releases)
-//! any of those is an error instead.
+//! falls back to an installed Hunspell dictionary or the crate's own core word list, and
+//! hyphenation that needs the data is off). With `CRAFT_I18N_REQUIRED=1` (releases) any of those
+//! is an error instead.
 //!
 //! When the English word list is embedded, the `craft_proof_data` cfg is set (the tests that pin
 //! results of the data use it).
@@ -45,7 +46,9 @@ fn main() {
             if required {
                 println!("cargo::error=CRAFT_I18N_REQUIRED=1 but CRAFT_I18N_DIR is unset: a release must embed the Language data");
             } else {
-                println!("cargo::warning=CRAFT_I18N_DIR is unset: craft-proof embeds no Language data (no English spelling marks, no hyphenation)");
+                println!(
+                    "cargo::warning=CRAFT_I18N_DIR is unset: craft-proof embeds no Language data (English spelling falls back to system Hunspell or the core word list; no hyphenation)"
+                );
             }
             None
         }

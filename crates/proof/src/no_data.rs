@@ -1,9 +1,11 @@
 //! A build with no Language data embedded (no `CRAFT_I18N_DIR`): every public entry point still
-//! works and never panics. English spelling marks nothing and suggests nothing, hyphenation that
-//! needs the data is off, and grammar (code, not data) still works.
+//! works and never panics. English spelling still marks obvious misspellings, against an English
+//! Hunspell dictionary installed on the system or else the core word list built into the crate;
+//! the dialect variants and hyphenation that need the data are off, and grammar (code, not data)
+//! still works.
 
 use crate::hyphen::{self, Limits, Source};
-use crate::{Options, ProofLang, dict, en_variants, patterns};
+use crate::{EnglishSource, Options, ProofLang, dict, en_variants, patterns};
 
 const LANGS: [ProofLang; 18] = [
     ProofLang::En,
@@ -50,22 +52,32 @@ fn nothing_is_embedded() {
     }
 }
 
+/// R6.4, English never goes unchecked: without the embedded word list, English is checked against
+/// an installed English Hunspell dictionary or, without one, the core word list. Either way an
+/// obvious misspelling is marked and common words are right. (Before, everything was right.)
 #[test]
-fn english_spelling_marks_nothing_and_suggests_nothing() {
-    for w in ["teh", "colour", "color", "zxqv", "desktop"] {
-        assert!(crate::is_correct(w), "{w}");
-        assert!(crate::is_correct_with(w, &Options::default()), "{w}");
-        assert!(crate::is_correct_for(w, Some("en-GB")), "{w}");
-        for l in [ProofLang::En, ProofLang::EnGb, ProofLang::EnCa] {
+fn english_spelling_still_marks_misspellings() {
+    let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    for l in [ProofLang::En, ProofLang::EnGb, ProofLang::EnCa] {
+        assert!(matches!(crate::english_source(l), Some(EnglishSource::Hunspell(_) | EnglishSource::CoreList)), "{l:?}");
+        assert!(!crate::is_correct_in("teh", l), "{l:?}");
+        assert!(crate::suggest_in("teh", 5, l).contains(&"the".to_string()), "{l:?}");
+        for w in ["the", "The", "house", "houses", "because", "running", "people", "beautiful", "don't"] {
             assert!(crate::is_correct_in(w, l), "{w} {l:?}");
-            assert!(crate::suggest_in(w, 5, l).is_empty(), "{w} {l:?}");
         }
-        assert!(crate::suggest(w, 5).is_empty(), "{w}");
+        assert_eq!(crate::check_spelling_in("Teh house of the people", l).len(), 1, "{l:?}");
+    }
+    assert!(!crate::is_correct("teh") && !crate::is_correct_with("teh", &Options::default()) && !crate::is_correct_for("teh", Some("en-GB")));
+    assert!(crate::suggest("teh", 5).contains(&"the".to_string()));
+    assert_eq!(crate::check_spelling("Teh house").len(), 1);
+    // The dialect variants are Language data: none without it.
+    for w in ["colour", "color"] {
         assert_eq!(en_variants::preferred(w, ProofLang::En), None);
         assert!(!en_variants::is_foreign(w, ProofLang::EnGb));
     }
-    assert!(crate::check_spelling("Teh colour of zxqv").is_empty());
-    assert!(crate::check_spelling_in("Teh colour", ProofLang::EnGb).is_empty());
+    // Text in a language without proofing is never checked with English.
+    assert!(crate::check_spelling_in("Teh hous zxqv", ProofLang::Other).is_empty());
+    assert!(crate::is_correct_for("teh", Some("fr-FR")));
 }
 
 #[test]
@@ -130,6 +142,7 @@ fn every_public_function_runs_without_data() {
             let _ = crate::is_correct_in_with(text, l, &opts);
             let _ = crate::suggest_in(text, 5, l);
             let _ = crate::dictionary_load_error(l);
+            let _ = crate::english_source(l);
             let _ = hyphen::word_breaks_in(text, l);
             let _ = hyphen::hyphen_points_in(text, &lim, l);
             let _ = hyphen::hyphenate_word_in(text, &lim, l);

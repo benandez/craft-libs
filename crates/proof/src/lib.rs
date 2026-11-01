@@ -49,10 +49,11 @@
 //! [`check_text`] checks a paragraph whose runs are in different languages.
 //!
 //! **Language data** (the Moby word list, the pattern files, our word supplements) is embedded at
-//! build time from craft-i18n's `language-data/` (`CRAFT_I18N_DIR`, see `build.rs`). A build
-//! without it has none: English spelling marks nothing and has no suggestions, and hyphenation
-//! that needs the data is off; grammar and the rule-based hyphenation (Bulgarian, Turkish,
-//! Russian) are code and still work.
+//! build time from craft-i18n's `language-data/` (`CRAFT_I18N_DIR`, see `build.rs`). English
+//! spelling never goes unchecked: without the embedded word list it uses an English Hunspell
+//! dictionary installed on the system, and without one the core word list built into the crate
+//! (see [`english_source`]). Hyphenation that needs the data is off without it; grammar and the
+//! rule-based hyphenation (Bulgarian, Turkish, Russian) are code and still work.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod affix;
@@ -64,6 +65,7 @@ pub mod bg;
 pub mod cs;
 pub mod dict;
 pub mod en_variants;
+mod english;
 pub mod es;
 pub mod hr;
 pub mod hunspell;
@@ -100,6 +102,7 @@ impl Default for Options {
     }
 }
 
+pub use english::EnglishSource;
 pub use lang::ProofLang;
 
 /// A problem found in text: byte range, kind, message and suggestions.
@@ -181,6 +184,7 @@ pub fn set_dictionaries_folder(dir: Option<std::path::PathBuf>) {
     cs::reload_dictionary();
     id::reload_dictionary();
     es::reload_dictionary();
+    english::reload();
     DICTIONARY_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -205,9 +209,11 @@ pub fn installed_dictionaries() -> Vec<(ProofLang, Option<std::path::PathBuf>)> 
 
 /// Why the dictionary found for `lang` failed to load (unsupported encoding, too large, a parse
 /// error), if it was read and failed. Doesn't read anything itself: a dictionary nobody has
-/// checked yet reports `None` (#2830).
+/// checked yet reports `None` (#2830). For an English, the embedded word list or (without it) the
+/// English Hunspell dictionary that failed; English then uses the next source ([`english_source`]).
 pub fn dictionary_load_error(lang: ProofLang) -> Option<String> {
     let key = match lang {
+        ProofLang::En | ProofLang::EnGb | ProofLang::EnCa => return english::load_error(lang),
         ProofLang::Pl => "pl_PL",
         ProofLang::Pt => "pt_BR",
         ProofLang::It => "it_IT",
@@ -218,6 +224,15 @@ pub fn dictionary_load_error(lang: ProofLang) -> Option<String> {
         _ => return None,
     };
     hunspell::load_error(key).map(|(_, reason)| reason)
+}
+
+/// Where the spelling of an English `lang` comes from now (`None` for other languages): the word
+/// list embedded at build time, else an English Hunspell dictionary from the dictionaries folder
+/// or the system (the run's English first), else the core word list built into the crate, which
+/// marks only near misses of common words. Reads the Hunspell dictionary once when there is no
+/// embedded word list (it is cached afterwards).
+pub fn english_source(lang: ProofLang) -> Option<EnglishSource> {
+    lang.is_english().then(|| english::source(lang))
 }
 
 /// A number that changes whenever a word is added to or removed from the user dictionary, or the
@@ -363,7 +378,18 @@ fn base_known(d: &dict::Dictionary, w: &str) -> bool {
 
 fn known_core(w: &str) -> bool {
     let d = dict::Dictionary::en_us();
-    if base_known(d, w) || COMMON.split(' ').any(|c| c == w) {
+    known_with(w, &|s| base_known(d, s))
+}
+
+/// [`known_core`] against the core word list built into the crate (no embedded word list).
+pub(crate) fn known_in_core_list(w: &str) -> bool {
+    known_with(w, &|s| english::core_contains(s) || extra_words().contains(s))
+}
+
+/// Is `w` (lower case) a word, by `base_known` (a base form in the word list), the common words,
+/// the user dictionary and the inflection and prefix rules?
+fn known_with(w: &str, base_known: &dyn Fn(&str) -> bool) -> bool {
+    if base_known(w) || COMMON.split(' ').any(|c| c == w) {
         return true;
     }
     if in_user_dictionary(w) {
@@ -392,7 +418,7 @@ fn known_core(w: &str) -> bool {
         {
             for a in adds {
                 let s = format!("{stem}{a}");
-                if base_known(d, &s) {
+                if base_known(&s) {
                     return true;
                 }
             }
@@ -402,7 +428,7 @@ fn known_core(w: &str) -> bool {
                 && b.len() >= 3
                 && b.last() == b.get(b.len() - 2)
                 && let Some(s) = stem.get(..stem.len() - 1)
-                && base_known(d, s)
+                && base_known(s)
             {
                 return true;
             }
@@ -412,7 +438,7 @@ fn known_core(w: &str) -> bool {
     for pre in ["un", "re", "non", "pre", "over", "under", "co", "mis"] {
         if let Some(rest) = w.strip_prefix(pre)
             && rest.len() >= 3
-            && base_known(d, rest)
+            && base_known(rest)
         {
             return true;
         }
@@ -495,7 +521,7 @@ pub fn is_correct(word: &str) -> bool {
 /// The words every language's check accepts under `opts`: single letters, words without
 /// letters, words with digits (Ignore words that contain numbers), words in capitals
 /// (Ignore words in UPPERCASE) and words in the user dictionary.
-fn accepted_by_options(word: &str, opts: &Options) -> bool {
+pub(crate) fn accepted_by_options(word: &str, opts: &Options) -> bool {
     let w = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'').trim_matches('\'');
     w.chars().count() <= 1
         || !w.chars().any(char::is_alphabetic)
@@ -506,16 +532,16 @@ fn accepted_by_options(word: &str, opts: &Options) -> bool {
         || in_user_dictionary(&w.to_lowercase())
 }
 
-/// Is the English word list embedded? Without it English can't be checked, so every English
-/// word counts as correct (no red underlines), as in a language without a dictionary.
-fn english_data() -> bool {
+/// Is the English word list embedded? Without it English is checked against an installed
+/// Hunspell dictionary or the core word list ([`english`]).
+pub(crate) fn english_data() -> bool {
     !dict::Dictionary::en_us().is_empty()
 }
 
 /// [`is_correct`] with the File › Options › Proofing choices.
 pub fn is_correct_with(word: &str, opts: &Options) -> bool {
     if !english_data() {
-        return true;
+        return english::is_correct(word, ProofLang::En, opts);
     }
     let w = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'');
     let w = w.trim_matches('\'');
@@ -538,15 +564,22 @@ pub fn is_correct_with(word: &str, opts: &Options) -> bool {
 
 /// Spelling suggestions for a misspelled word (best first, at most `max`).
 pub fn suggest(word: &str, max: usize) -> Vec<String> {
+    if !english_data() {
+        return english::suggest(word, max, ProofLang::En);
+    }
+    suggest_from(word, max, dict::Dictionary::en_us().iter().map(|(w, _)| w))
+}
+
+/// [`suggest`] from `words` (lower case) and our supplement.
+pub(crate) fn suggest_from<'a>(word: &str, max: usize, words: impl Iterator<Item = &'a str>) -> Vec<String> {
     let lower = word.to_lowercase();
     let n = lower.chars().count();
     if n == 0 || n > 40 {
         return Vec::new();
     }
-    let d = dict::Dictionary::en_us();
     let mut scored: Vec<(usize, i64, String)> = Vec::new();
     let target: Vec<char> = lower.chars().collect();
-    for w in d.iter().map(|(w, _)| w).chain(extra_words().iter().copied()) {
+    for w in words.chain(extra_words().iter().copied()) {
         let wn = w.chars().count();
         if wn + 2 < n || wn > n + 2 {
             continue;
@@ -598,7 +631,7 @@ fn english_preferred(lower: &str, lang: ProofLang) -> Option<String> {
 /// list's words ([`en_variants`]). The user dictionary overrules both.
 fn is_correct_english(word: &str, lang: ProofLang, opts: &Options) -> bool {
     if !english_data() {
-        return true;
+        return english::is_correct(word, lang, opts);
     }
     let w = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'').trim_matches('\'');
     if accepted_by_options(w, opts) {
@@ -623,7 +656,8 @@ fn suggest_english(word: &str, max: usize, lang: ProofLang) -> Vec<String> {
     if let Some(p) = english_preferred(&lower, lang) {
         out.push(match_case(word, p));
     }
-    for s in suggest(word, max.saturating_add(2)) {
+    let shared = if english_data() { suggest(word, max.saturating_add(2)) } else { english::suggest(word, max.saturating_add(2), lang) };
+    for s in shared {
         let s = english_preferred(&s.to_lowercase(), lang).map_or(s, |p| match_case(word, p));
         if !out.contains(&s) {
             out.push(s);
@@ -634,7 +668,7 @@ fn suggest_english(word: &str, max: usize, lang: ProofLang) -> Vec<String> {
 }
 
 /// Optimal string alignment distance, early-exit at 3.
-fn damerau(a: &[char], b: &str) -> usize {
+pub(crate) fn damerau(a: &[char], b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
     let (n, m) = (a.len(), b.len());
     let mut prev2 = vec![0usize; m + 1];
@@ -1038,6 +1072,11 @@ fn starts_consonant_sound(w: &str) -> bool {
     ["uni", "use", "usu", "eu", "one", "once", "ubiq", "uti", "ure", "uro"].iter().any(|p| l.starts_with(p))
 }
 
+/// Held by tests that change the dictionaries folder or rely on what it holds, so a folder change
+/// can't land mid-test.
+#[cfg(test)]
+pub(crate) static DICTIONARY_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The no-Language-data build (`build.rs` sets `craft_proof_data` when the English word list is
 /// embedded).
 #[cfg(all(test, not(craft_proof_data)))]
@@ -1087,18 +1126,10 @@ mod tests {
 
     use super::*;
 
-    /// Held by tests that swap or rely on the shared Spanish dictionary, so a folder reset can't land mid-test.
-    static DICTIONARY_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// #1063: the dictionaries folder is searched before the system locations; the dictionaries
-    /// in it are reported and used, and cached checks are dropped. The folder holds the same test
-    /// dictionaries the other tests install, so tests running meanwhile see the same words; it
-    /// stays set for the rest of the run for that reason.
-    #[test]
-    fn dictionaries_folder_is_searched_first() {
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = std::env::temp_dir().join(format!("wc-proof-dictionaries-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+    /// The non-English test dictionaries every dictionaries-folder test puts in its folder, so
+    /// tests running meanwhile see the same words whichever of those folders is set.
+    fn write_test_dictionaries(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir).unwrap();
         for (name, aff, dic) in [
             ("pl_PL", pl::test_dict::AFF, pl::test_dict::DIC),
             ("pt_BR", pt::test_dict::AFF, pt::test_dict::DIC),
@@ -1115,6 +1146,107 @@ mod tests {
             std::fs::write(dir.join(format!("{name}.aff")), aff).unwrap();
             std::fs::write(dir.join(format!("{name}.dic")), dic).unwrap();
         }
+    }
+
+    /// Set `dir` (with [`write_test_dictionaries`] and `english`, `(name, .aff, .dic)` files) as
+    /// the dictionaries folder; the English files are removed again by [`drop_english_files`].
+    fn folder_with_english(dir: &std::path::Path, english: &[(&str, &[u8], &[u8])]) {
+        write_test_dictionaries(dir);
+        for (name, aff, dic) in english {
+            std::fs::write(dir.join(format!("{name}.aff")), aff).unwrap();
+            std::fs::write(dir.join(format!("{name}.dic")), dic).unwrap();
+        }
+        set_dictionaries_folder(Some(dir.to_path_buf()));
+    }
+
+    /// Remove the English files of `dir` and set it again: English goes back to what it was
+    /// (the core list, or a dictionary installed on the system), for the tests that follow.
+    fn drop_english_files(dir: &std::path::Path, english: &[(&str, &[u8], &[u8])]) {
+        for (name, _, _) in english {
+            let _ = std::fs::remove_file(dir.join(format!("{name}.aff")));
+            let _ = std::fs::remove_file(dir.join(format!("{name}.dic")));
+        }
+        set_dictionaries_folder(Some(dir.to_path_buf()));
+    }
+
+    /// R6.4, English never goes unchecked: with no embedded word list, an English Hunspell
+    /// dictionary (here in the dictionaries folder) is used before the core word list built into
+    /// the crate; with one, the embedded list stays in use whatever is installed.
+    #[test]
+    fn english_hunspell_dictionary_is_used_before_the_core_list() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = std::env::temp_dir().join(format!("wc-proof-en-hunspell-{}", std::process::id()));
+        // A tiny en_US. `teh` is a word in it, so a right `teh` is this dictionary answering (the
+        // core list marks it); `hous` and `because` aren't.
+        let english: &[(&str, &[u8], &[u8])] =
+            &[("en_US", b"SET UTF-8\nTRY esiarntolcdugmphbyfvkwz\nSFX S Y 1\nSFX S 0 s .\n", b"3\nteh\nthe\nhouse/S\n")];
+        folder_with_english(&dir, english);
+        if cfg!(craft_proof_data) {
+            assert_eq!(english_source(ProofLang::En), Some(EnglishSource::Embedded));
+            // (The Moby list has `teh`.)
+            assert!(!is_correct_in("becuase", ProofLang::En) && is_correct_in("because", ProofLang::En));
+            assert_eq!(dictionary_load_error(ProofLang::En), None);
+        } else {
+            let dic = dir.join("en_US.dic");
+            assert_eq!(english_source(ProofLang::En), Some(EnglishSource::Hunspell(dic.clone())));
+            for w in ["teh", "Teh", "the", "house", "houses", "House"] {
+                assert!(is_correct_in(w, ProofLang::En), "{w}");
+            }
+            for w in ["hous", "because", "housez"] {
+                assert!(!is_correct_in(w, ProofLang::En), "{w}: the dictionary's words, not the core list's");
+            }
+            assert!(!is_correct("hous") && is_correct("teh"), "the older English-only functions too");
+            assert_eq!(check_spelling_in("teh hous", ProofLang::En).len(), 1);
+            assert!(suggest_in("hous", 3, ProofLang::En).contains(&"house".to_string()), "{:?}", suggest_in("hous", 3, ProofLang::En));
+            // No en_GB or en_CA file: the en_US one beats the core list.
+            assert_eq!(english_source(ProofLang::EnGb), Some(EnglishSource::Hunspell(dic.clone())));
+            assert_eq!(english_source(ProofLang::EnCa), Some(EnglishSource::Hunspell(dic)));
+        }
+        // Text in a language without proofing is never checked with English.
+        assert!(check_spelling_in("hous teh zxqv", ProofLang::Other).is_empty());
+        assert!(check_text("hous teh", &[(0..8, ProofLang::De)]).is_empty());
+        assert_eq!(english_source(ProofLang::Pl), None);
+        drop_english_files(&dir, english);
+        if !cfg!(craft_proof_data) {
+            assert_ne!(english_source(ProofLang::En), Some(EnglishSource::Hunspell(dir.join("en_US.dic"))));
+        }
+    }
+
+    /// R6.4: an English Hunspell dictionary that is there but can't be read (an encoding we don't
+    /// read, bytes that aren't UTF-8, no words) is an error reported for its English, never a
+    /// panic, and that English falls back to the core list, which still marks `becuase`.
+    #[test]
+    fn unreadable_english_dictionary_is_reported_and_skipped() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = std::env::temp_dir().join(format!("wc-proof-en-unreadable-{}", std::process::id()));
+        let english: &[(&str, &[u8], &[u8])] =
+            &[("en_US", b"SET UTF-8\n", b"0\n"), ("en_GB", b"SET SHIFT_JIS\n", b"1\ncolour\n"), ("en_CA", b"SET UTF-8\n", b"1\n\xff\xfe\n")];
+        folder_with_english(&dir, english);
+        for (lang, reason) in [(ProofLang::En, "no words"), (ProofLang::EnGb, "unsupported encoding"), (ProofLang::EnCa, "not UTF-8")] {
+            if cfg!(craft_proof_data) {
+                assert_eq!(english_source(lang), Some(EnglishSource::Embedded));
+                assert_eq!(dictionary_load_error(lang), None, "{lang:?}: never read");
+            } else {
+                assert_eq!(english_source(lang), Some(EnglishSource::CoreList), "{lang:?}");
+                let error = dictionary_load_error(lang).unwrap_or_default();
+                assert!(error.contains(reason), "{lang:?}: {error}");
+            }
+            assert!(!is_correct_in("becuase", lang) && is_correct_in("because", lang) && is_correct_in("houses", lang), "{lang:?}");
+            assert!(suggest_in("becuase", 3, lang).contains(&"because".to_string()), "{lang:?}");
+        }
+        drop_english_files(&dir, english);
+        assert_eq!(dictionary_load_error(ProofLang::EnGb), None, "a new folder forgets the old errors");
+    }
+
+    /// #1063: the dictionaries folder is searched before the system locations; the dictionaries
+    /// in it are reported and used, and cached checks are dropped. The folder holds the same test
+    /// dictionaries the other tests install, so tests running meanwhile see the same words; it
+    /// stays set for the rest of the run for that reason.
+    #[test]
+    fn dictionaries_folder_is_searched_first() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = std::env::temp_dir().join(format!("wc-proof-dictionaries-{}", std::process::id()));
+        write_test_dictionaries(&dir);
         // #3252 review: force Russian and Czech to cache whatever they find before the folder is
         // set (empty, with no folder and nothing installed on CI), so the folder change below has
         // a stale cache to actually invalidate, not just an untouched `None`.
@@ -1524,9 +1656,11 @@ mod tests {
         assert!(words.iter().all(|w| w.chars().all(|c| c.is_lowercase() || c == '\'' || c == '-')), "not lowercase");
     }
 
-    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
+    /// Without the Language data too: the installed English dictionary or the core list marks
+    /// both near misses (R6.4).
     #[test]
     fn spelling_issues_in_text() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let t = "This sentense has a mispelled word, see https://example.com/xyzq.";
         let v = check_spelling(t);
         let bad: Vec<&str> = v.iter().map(|i| &t[i.start..i.end]).collect();

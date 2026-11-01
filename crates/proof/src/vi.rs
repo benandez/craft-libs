@@ -83,9 +83,11 @@ mod checker_tests {
         assert!(check_text_with(text, &[], &Options::default(), true, false).is_empty());
     }
 
-    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
+    /// Without the Language data too: the installed English dictionary or the core list marks
+    /// `yesterdy` (R6.4).
     #[test]
     fn english_keeps_its_marks_and_skips_vietnamese_names() {
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let text = "We met Nguyễn yesterdy at the office.";
         let issues = check_text_with(text, &[(0..text.len(), ProofLang::En)], &Options::default(), false, false);
         let flagged: Vec<&str> = issues.iter().filter_map(|i| text.get(i.start..i.end)).collect();

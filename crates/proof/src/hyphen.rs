@@ -44,7 +44,7 @@ impl Dictionary {
                 return Dictionary::default();
             }
             Dictionary::from_bytes(EN_US_DIC).unwrap_or_else(|e| {
-                log::error!("{e}");
+                crate::english::note_embedded_error(e);
                 Dictionary::default()
             })
         })
