@@ -659,7 +659,8 @@ pub(crate) fn accepted_by_options(word: &str, opts: &Options) -> bool {
     w.chars().count() <= 1
         || !w.chars().any(char::is_alphabetic)
         || (opts.ignore_numbers && w.chars().any(|c| c.is_ascii_digit()))
-        || (opts.ignore_uppercase && w.chars().all(|c| !c.is_lowercase()))
+        // Only a word with a cased letter is in capitals: a Hebrew or Thai word has none.
+        || (opts.ignore_uppercase && w.chars().any(char::is_uppercase) && w.chars().all(|c| !c.is_lowercase()))
         // The whole word: the languages split a hyphenated word into its parts, and an added
         // `Unigranrio-RJ` is none of them (#2082).
         || in_user_dictionary(&w.to_lowercase())
@@ -1645,6 +1646,29 @@ mod tests {
         );
         assert!(unchecked(nl) || before.2.is_some());
         assert_eq!(check_text(text, &[]), english_before);
+        packs::set_packs_dir(None);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Second review of #485: "Ignore words in UPPERCASE" never skips a word with no cased
+    /// letter, so a misspelt Hebrew or Arabic word is still marked.
+    #[test]
+    fn caseless_scripts_are_not_read_as_uppercase() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let root = std::env::temp_dir().join(format!("wc-proof-caseless-packs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_pack(&root, "he", &[("spelling.aff", b"SET UTF-8\n"), ("spelling.dic", "1\nשלום\n".as_bytes())]);
+        write_pack(&root, "ar", &[("spelling.aff", b"SET UTF-8\n"), ("spelling.dic", "1\nسلام\n".as_bytes())]);
+        packs::set_packs_dir(Some(root.clone()));
+        let (he, ar) = (ProofLang::from_tag(Some("he-IL")), ProofLang::from_tag(Some("ar-EG")));
+        assert!(Options::default().ignore_uppercase);
+        assert!(is_correct_in("שלום", he) && !is_correct_in("שלוםם", he));
+        assert!(is_correct_in("سلام", ar) && !is_correct_in("سلامم", ar));
+        let text = "שלום שלוםם";
+        let issues = check_text(text, &[(0..text.len(), he)]);
+        assert_eq!(issues.iter().map(|i| &text[i.start..i.end]).collect::<Vec<_>>(), ["שלוםם"], "{issues:?}");
         packs::set_packs_dir(None);
         set_dictionaries_folder(Some(shared_test_folder()));
         let _ = std::fs::remove_dir_all(&root);

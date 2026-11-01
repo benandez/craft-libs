@@ -30,7 +30,8 @@ pub(crate) fn word_to_check_in<'a>(d: &AffixDict, word: &'a str, opts: &Options)
     if n <= 1 || (opts.ignore_numbers && w.chars().any(|c| c.is_ascii_digit())) || !w.chars().any(char::is_alphabetic) {
         return None;
     }
-    if opts.ignore_uppercase && w.chars().all(|c| !c.is_lowercase()) && n <= 6 {
+    // Only a word with a cased letter can be in capitals: Hebrew, Arabic, Thai… words have none.
+    if opts.ignore_uppercase && w.chars().any(char::is_uppercase) && w.chars().all(|c| !c.is_lowercase()) && n <= 6 {
         return None;
     }
     Some(w)
