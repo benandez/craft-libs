@@ -210,13 +210,15 @@ fn spaces(text: &str, v: &mut Vec<Issue>) {
 
 fn sentence_capitals(text: &str, ws: &[(usize, usize)], capital_first: bool, v: &mut Vec<Issue>) {
     let mut after_end = capital_first;
-    for (a, b) in ws {
+    for (i, (a, b)) in ws.iter().enumerate() {
         let Some(w) = text.get(*a..*b) else { continue };
         if after_end && w.chars().next().is_some_and(char::is_lowercase) && w.chars().all(char::is_alphabetic) {
             let fixed: String = w.chars().next().map(|f| f.to_uppercase().chain(w.chars().skip(1)).collect()).unwrap_or_default();
             v.push(issue(*a, *b, "Maiuscola a inizio frase".into(), vec![fixed]));
         }
-        after_end = ends_sentence(text.get(*b..).unwrap_or(""), w);
+        // Only the gap before the next word: the rest of the paragraph never ends a sentence.
+        let next = ws.get(i + 1).map_or(text.len(), |n| n.0);
+        after_end = ends_sentence(text.get(*b..next).unwrap_or(""), w);
     }
 }
 
@@ -382,6 +384,15 @@ mod tests {
 
     fn pair(a: &str, b: &str) -> (String, String) {
         (a.to_string(), b.to_string())
+    }
+
+    /// CodeRabbit on craft-libs#484: a sentence after the first one starts with a capital too.
+    #[test]
+    fn later_sentences_start_with_a_capital() {
+        assert!(fixes("Vado a Roma. il cane dorme.").contains(&pair("il", "Il")));
+        assert!(fixes("Vado a Roma? sì.").contains(&pair("sì", "Sì")));
+        assert!(!fixes("Vado a Roma. Il cane dorme.").iter().any(|(_, b)| b == "Il"));
+        assert!(!fixes("Il sig. rossi arriva.").iter().any(|(a, _)| a == "rossi"), "after an abbreviation");
     }
 
     #[test]
