@@ -149,10 +149,13 @@ pub fn load_errors() -> Vec<(String, String)> {
 /// embedded at build time, then each installed pack's `LICENCES/` files (About › Language data).
 pub fn licence_texts() -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
-    if !crate::data::EN_US_DIC.is_empty() {
+    // One Moby entry: the embedded data's, else the copy built into the crate (`en-words.dic`).
+    if crate::data::EN_US_DIC.is_empty() {
+        out.push(("English word list (Moby Hyphenator II)".into(), BUILT_IN_MOBY_NOTICE.into()));
+    } else {
         out.push(("English word list and hyphenation (Moby Hyphenator II)".into(), MOBY_NOTICE.into()));
     }
-    out.push(("English word list built into craft-proof".into(), CORE_LIST_NOTICE.into()));
+    out.push(("English word supplement (en-extra.txt)".into(), EXTRA_EN_NOTICE.into()));
     out.extend(crate::data::EMBEDDED_LICENCES.iter().map(|(t, x)| ((*t).to_string(), (*x).to_string())));
     // Each file is checked against what is left before it is read, so no more is ever read.
     let mut left: u64 = MAX_LICENCE_TOTAL;
@@ -180,11 +183,16 @@ const MOBY_NOTICE: &str = "The Moby Hyphenator II word list by Grady Ward (Proje
 The English hyphenation patterns were trained from it for the Craft apps and are distributed with them under MIT OR Apache-2.0.";
 
 /// The notice of the word list built into the crate (`data/en-words.dic`).
-const CORE_LIST_NOTICE: &str = "The English word list built into craft-proof is the Moby Hyphenator II word list by Grady Ward \
+const BUILT_IN_MOBY_NOTICE: &str = "The English word list built into craft-proof is the Moby Hyphenator II word list by Grady Ward \
 (Project Gutenberg eBook #3204), which is in the public domain.";
 
-/// The locales whose Language data is embedded in this build (`en-us`…, and in a Language build
-/// the ones it names; `CRAFT_PROOF_EMBED`).
+/// The notice of our English supplement (`data/en-extra.txt`, and craft-i18n's copy).
+const EXTRA_EN_NOTICE: &str = "The English word supplement (en-extra.txt), common words the Moby list lacks, is written by \
+WordCraft contributors and licensed MIT OR Apache-2.0.";
+
+/// The locales whose Language data is embedded in this build: `en-us`, and by default `de`,
+/// `pl`, `pt`, `it`, `ru` (until Language packs ship, CP4.4); a build with `CRAFT_PROOF_EMBED`
+/// embeds English and the ones it names (`en`: English only).
 pub fn embedded_locales() -> &'static [&'static str] {
     crate::data::EMBEDDED_LOCALES
 }
@@ -615,24 +623,38 @@ mod tests {
         assert!(parse_pack_toml(&deep).is_err());
     }
 
-    /// Review of #485: our own word supplements (`ru-extra.txt`, MIT) stay embedded in the
-    /// default build; they aren't upstream data and don't make a locale "embedded".
+    /// Review of #485: our own word supplements (`ru-extra.txt`, MIT) stay embedded in every
+    /// build, the English-only one too.
     #[test]
-    fn our_supplements_are_embedded_by_default() {
+    fn our_supplements_are_always_embedded() {
         if cfg!(craft_proof_data) {
             assert!(!crate::data::EXTRA_RU.is_empty(), "ru-extra.txt is embedded");
         }
-        let embed = option_env!("CRAFT_PROOF_EMBED").unwrap_or_default();
-        if embed.is_empty() {
-            assert!(!embedded_locales().contains(&"ru"));
+    }
+
+    /// #5208 review: until Language packs are published, the default build embeds the
+    /// carry-over locales (de, pl, pt, it patterns, ru-extra); `CRAFT_PROOF_EMBED=en` is the
+    /// English-only build (CP4.4's default once language-packs-1 is pinned).
+    #[test]
+    fn the_default_build_embeds_the_carry_over_locales() {
+        let embed = option_env!("CRAFT_PROOF_EMBED").unwrap_or_default().trim().to_ascii_lowercase();
+        let named: Vec<&str> = if embed.is_empty() { vec!["de", "pl", "pt", "it", "ru"] } else { embed.split(',').map(str::trim).collect() };
+        for l in embedded_locales() {
+            assert!(l.starts_with("en-") || *l == "ru" || named.iter().any(|e| e == l || *e == "all"), "{l} is embedded");
+        }
+        if cfg!(craft_proof_data) && embed.is_empty() {
+            for l in ["de", "pl", "pt", "it"] {
+                assert!(embedded_locales().contains(&l), "{l} is embedded by default");
+            }
         }
     }
 
+    /// One Moby entry, and the supplement's own licence.
     #[test]
-    fn embedded_locales_are_english_unless_a_language_build_names_more() {
-        let embed = option_env!("CRAFT_PROOF_EMBED").unwrap_or_default();
-        for l in embedded_locales() {
-            assert!(l.starts_with("en-") || embed.split(',').any(|e| e.trim() == *l || e.trim() == "all"), "{l} is embedded");
-        }
+    fn built_in_notices_name_the_real_sources() {
+        let texts = licence_texts();
+        assert_eq!(texts.iter().filter(|(t, _)| t.contains("Moby")).count(), 1, "{texts:?}");
+        assert!(texts.iter().any(|(t, x)| t.contains("en-extra.txt") && x.contains("MIT OR Apache-2.0")));
+        assert!(!texts.iter().any(|(t, _)| t.contains("core")), "the core list is gone");
     }
 }

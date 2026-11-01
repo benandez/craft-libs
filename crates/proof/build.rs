@@ -8,7 +8,7 @@
 //! hyphenation that needs the data is off). With `CRAFT_I18N_REQUIRED=1` (releases) any of those
 //! is an error instead.
 //!
-//! When every file in [`FILES`] this build embeds (English and the `CRAFT_PROOF_EMBED` locales) is
+//! When every file in [`FILES`] this build embeds (English and the [`opted_in`] locales) is
 //! there, the `craft_proof_data` cfg is set (the tests that pin
 //! results of the data use it); when none is, `craft_proof_no_data` (the tests of a build without
 //! the data). A partial data folder sets neither, so neither set of tests runs against it.
@@ -24,8 +24,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 /// (constant, path under `language-data/`, bytes rather than text). The first path part is the
-/// locale: `en-*` and our own `*-extra.txt` supplements are always embedded, any other only in a
-/// Language build that names it.
+/// locale: `en-*` and our own `*-extra.txt` supplements are always embedded, the others as
+/// [`opted_in`] says.
 const FILES: &[(&str, &str, bool)] = &[
     ("EN_US_DIC", "en-us/en-us.dic", true),
     ("EN_US_AFF", "en-us/spelling.aff", false),
@@ -45,10 +45,17 @@ const FILES: &[(&str, &str, bool)] = &[
     ("EXTRA_RU", "ru/ru-extra.txt", false),
 ];
 
-/// The locales a Language build embeds besides English: `CRAFT_PROOF_EMBED`, comma-separated
-/// lowercase locales (`de,pl`), or `all`. Unset: English (and our supplements) only; the others come from Language packs.
+/// The locales embedded by default besides English: every carry-over locale, until Language
+/// packs are published and pinned (CP4.4 then makes the default English only).
+const DEFAULT_EMBED: &[&str] = &["de", "pl", "pt", "it", "ru"];
+
+/// The locales this build embeds besides English: `CRAFT_PROOF_EMBED`, comma-separated lowercase
+/// locales (`de,pl`), `all`, or `en` (English and our supplements only; the others come from
+/// Language packs). Unset: [`DEFAULT_EMBED`].
 fn opted_in() -> Vec<String> {
-    std::env::var("CRAFT_PROOF_EMBED").unwrap_or_default().split(',').map(|l| l.trim().to_ascii_lowercase()).filter(|l| !l.is_empty()).collect()
+    let v = std::env::var("CRAFT_PROOF_EMBED").unwrap_or_default();
+    let named: Vec<String> = v.split(',').map(|l| l.trim().to_ascii_lowercase()).filter(|l| !l.is_empty()).collect();
+    if named.is_empty() { DEFAULT_EMBED.iter().map(|l| (*l).to_string()).collect() } else { named }
 }
 
 /// Our own word supplements (`*-extra.txt`): MIT, tiny, embedded in every build whatever the

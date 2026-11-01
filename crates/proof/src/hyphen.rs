@@ -19,9 +19,9 @@
 //! Swiss text, whose `ss` the patterns split like any double consonant (`Stras-se`).
 //!
 //! **Installed Language packs** ([`crate::packs`]): a pack's `hyphenation.pat` for the language
-//! comes first, for every language but English (embedded). Only English is embedded by default;
-//! the Polish, Portuguese, Italian and German patterns are embedded only in a Language build
-//! (`CRAFT_PROOF_EMBED`), and otherwise come from their packs.
+//! comes first, for every language but English (embedded). The Polish, Portuguese, Italian and
+//! German patterns are embedded by default too until Language packs ship (CP4.4); a build with
+//! `CRAFT_PROOF_EMBED=en` leaves them to their packs.
 //!
 //! Then the paragraph's limits ([`Limits`]) are applied.
 
@@ -819,7 +819,7 @@ mod tests {
         hyphenate_word_in(w, &Limits::default(), ProofLang::Pl)
     }
 
-    #[cfg_attr(not(craft_proof_embed = "pl"), ignore = "needs the pl Language data (CRAFT_I18N_DIR, CRAFT_PROOF_EMBED=pl)")]
+    #[cfg_attr(not(craft_proof_embed = "pl"), ignore = "needs the pl Language data (CRAFT_I18N_DIR; not in a CRAFT_PROOF_EMBED=en build)")]
     #[test]
     fn polish_patterns_load() {
         let p = Patterns::pl();
@@ -836,7 +836,7 @@ mod tests {
         hyphenate_word_in(w, &Limits::default(), ProofLang::It)
     }
 
-    #[cfg_attr(not(craft_proof_embed = "it"), ignore = "needs the it Language data (CRAFT_I18N_DIR, CRAFT_PROOF_EMBED=it)")]
+    #[cfg_attr(not(craft_proof_embed = "it"), ignore = "needs the it Language data (CRAFT_I18N_DIR; not in a CRAFT_PROOF_EMBED=en build)")]
     #[test]
     fn italian_patterns_load() {
         let p = Patterns::it();
@@ -845,7 +845,7 @@ mod tests {
         assert_eq!(p.exception_count(), 0);
     }
 
-    #[cfg_attr(not(craft_proof_embed = "it"), ignore = "needs the it Language data (CRAFT_I18N_DIR, CRAFT_PROOF_EMBED=it)")]
+    #[cfg_attr(not(craft_proof_embed = "it"), ignore = "needs the it Language data (CRAFT_I18N_DIR; not in a CRAFT_PROOF_EMBED=en build)")]
     #[test]
     fn italian_words_hyphenate_by_italian_rules() {
         for (w, want) in [
@@ -872,7 +872,7 @@ mod tests {
         assert_eq!(word_breaks_in("famiglia", ProofLang::It).1, Source::Patterns);
     }
 
-    #[cfg_attr(not(craft_proof_embed = "pt"), ignore = "needs the pt Language data (CRAFT_I18N_DIR, CRAFT_PROOF_EMBED=pt)")]
+    #[cfg_attr(not(craft_proof_embed = "pt"), ignore = "needs the pt Language data (CRAFT_I18N_DIR; not in a CRAFT_PROOF_EMBED=en build)")]
     #[test]
     fn portuguese_patterns_load() {
         let p = Patterns::pt();
@@ -884,7 +884,7 @@ mod tests {
         assert_eq!(p.exception("software"), Some(&[4][..]));
     }
 
-    #[cfg_attr(not(craft_proof_embed = "pt"), ignore = "needs the pt Language data (CRAFT_I18N_DIR, CRAFT_PROOF_EMBED=pt)")]
+    #[cfg_attr(not(craft_proof_embed = "pt"), ignore = "needs the pt Language data (CRAFT_I18N_DIR; not in a CRAFT_PROOF_EMBED=en build)")]
     #[test]
     fn portuguese_words_hyphenate_by_portuguese_rules() {
         for (w, want) in [
@@ -904,7 +904,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(not(craft_proof_embed = "pl"), ignore = "needs the pl Language data (CRAFT_I18N_DIR, CRAFT_PROOF_EMBED=pl)")]
+    #[cfg_attr(not(craft_proof_embed = "pl"), ignore = "needs the pl Language data (CRAFT_I18N_DIR; not in a CRAFT_PROOF_EMBED=en build)")]
     #[test]
     fn polish_words_hyphenate_by_polish_rules() {
         for (w, want) in [
@@ -938,7 +938,7 @@ mod tests {
         assert_eq!(word_breaks_in("konstytucja", ProofLang::Pl).1, Source::Patterns);
     }
 
-    #[cfg_attr(not(craft_proof_embed = "pl"), ignore = "needs the pl Language data (CRAFT_I18N_DIR, CRAFT_PROOF_EMBED=pl)")]
+    #[cfg_attr(not(craft_proof_embed = "pl"), ignore = "needs the pl Language data (CRAFT_I18N_DIR; not in a CRAFT_PROOF_EMBED=en build)")]
     #[test]
     fn polish_heuristic_for_foreign_letters() {
         // Letters outside the Polish alphabet: the Polish syllable heuristic, digraphs kept whole.
@@ -960,7 +960,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(not(craft_proof_embed = "de"), ignore = "needs the de Language data (CRAFT_I18N_DIR, CRAFT_PROOF_EMBED=de)")]
+    #[cfg_attr(not(craft_proof_embed = "de"), ignore = "needs the de Language data (CRAFT_I18N_DIR; not in a CRAFT_PROOF_EMBED=en build)")]
     #[test]
     fn german_patterns_load() {
         let p = Patterns::de();
@@ -969,7 +969,7 @@ mod tests {
         assert_eq!(p.exception_count(), 0);
     }
 
-    #[cfg_attr(not(craft_proof_embed = "de"), ignore = "needs the de Language data (CRAFT_I18N_DIR, CRAFT_PROOF_EMBED=de)")]
+    #[cfg_attr(not(craft_proof_embed = "de"), ignore = "needs the de Language data (CRAFT_I18N_DIR; not in a CRAFT_PROOF_EMBED=en build)")]
     #[test]
     fn german_words_follow_the_german_patterns() {
         let de = |w: &str| hyphenate_word_in(w, &Limits::default(), ProofLang::De);

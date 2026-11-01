@@ -14,9 +14,9 @@ craft-proof = { git = "https://github.com/storytold/craft-libs", rev = "<commit>
 | Language | Spelling | Grammar | Hyphenation |
 |---|---|---|---|
 | English (en-US, en-CA, en-GB and the British-spelling Englishes such as en-AU, en-NZ) | SCOWL 2026 Hunspell dictionary per English + `en-extra.txt`, dialect policy (`en-variants.txt`); a dictionaries-folder English first; without SCOWL the installed Hunspell English, else the built-in Moby list ([below](#english-is-always-checked)) | yes | Moby list, our patterns, heuristic |
-| Polish, Portuguese, Italian | the installed Hunspell dictionary | yes | TeX patterns (Language pack, or a Language build) |
+| Polish, Portuguese, Italian | the installed Hunspell dictionary | yes | TeX patterns (embedded, or a Language pack) |
 | Croatian, Turkish, Russian, Czech, Indonesian, Spanish (es, es-MX, es-419, es-UY) | the installed Hunspell dictionary (Russian also `ru-extra.txt`) | yes | Turkish and Russian rules; English fallback otherwise |
-| German | — | — | TeX patterns (Language pack, or a Language build) |
+| German | — | — | TeX patterns (embedded, or a Language pack) |
 | Bulgarian | — | — | syllable rules |
 
 Grammar rules, suggestion tuning and the rule-based hyphenation are code: they work in every
@@ -59,8 +59,11 @@ Tests that pin results of the data run only when every file the build embeds is 
 `src/no_data.rs` runs every public entry point when none is (`craft_proof_no_data`). A partial
 data folder runs neither set.
 
-- Only English (`en-*`) and our own word supplements (`*-extra.txt`, MIT) are embedded by default. A **Language build** names the others it embeds
-  with `CRAFT_PROOF_EMBED=de,pl` (or `all`); every other build gets them from a Language pack.
+- By default every carry-over locale is embedded: English, the German, Polish, Portuguese and
+  Italian patterns and our own word supplements (`*-extra.txt`, MIT), as before Language packs.
+  `CRAFT_PROOF_EMBED` picks the set: `en` (English and our supplements only; the others come from
+  Language packs), `de,pl`, or `all`. Making `en` the default is **CP4.4**, done in the release
+  that publishes and pins `language-packs-1`.
   `craft_proof::packs::embedded_locales()` lists what a build embeds.
 
 ## Language packs
@@ -75,7 +78,7 @@ pub fn packs_dir() -> Option<PathBuf>;                 // ＋
 pub fn installed() -> Vec<InstalledPack>;              // InstalledPack { locale, name, licence, path }, by locale
 pub fn licence_texts() -> Vec<(String, String)>;       // (title, text): embedded English notices, then each pack's LICENCES/*
 pub fn load_errors() -> Vec<(String, String)>;         // ＋ (locale or folder, reason): packs skipped, pattern files that failed
-pub fn embedded_locales() -> &'static [&'static str];  // ＋ what this build embeds ("en-us"; more in a Language build)
+pub fn embedded_locales() -> &'static [&'static str];  // ＋ what this build embeds ("en-us", "de", "pl", "pt", "it", "ru" by default; "en-us" with CRAFT_PROOF_EMBED=en)
 
 // craft_proof (crate root)
 pub enum ProofLang { …, Pack(PackLocale), Other }      // ＋ Pack: any language without tools of its own (nl, fr, sr-Latn…)
@@ -127,8 +130,7 @@ locale (`nl`, `pt-br`, `sr-latn`):
 Hunspell dictionaries, then (English only) the built-in core list. A slot's Hunspell names map to
 pack locales (`pt_BR` → `pt-br`, then `pt`, then any other `pt-*` pack). Hyphenation, every
 language but English: an installed pack's patterns for a word in the language's script (Russian,
-Bulgarian, Turkish: their script; others: letters the patterns know), then the embedded ones (a
-Language build), then the language's rules or the English fallback as before.
+Bulgarian, Turkish: their script; others: letters the patterns know), then the embedded ones, then the language's rules or the English fallback as before.
 
 **Hostile packs.** Every file is read only if it is a regular file (never through a symbolic
 link), size-capped (`pack.toml` 1 MB, licences 4 MB, dictionaries and patterns 64 MB), and a pack
@@ -205,7 +207,7 @@ and the notice); the Moby list (432,905 bytes) stays for hyphenation.
 cargo fmt -p craft-proof --check
 cargo clippy -p craft-proof --all-targets -- -D warnings
 CRAFT_I18N_DIR=/abs/path/craft-i18n cargo test -p craft-proof
-CRAFT_PROOF_EMBED=all CRAFT_I18N_DIR=/abs/path/craft-i18n cargo test -p craft-proof   # a Language build
+CRAFT_PROOF_EMBED=en CRAFT_I18N_DIR=/abs/path/craft-i18n cargo test -p craft-proof    # the English-only build (CP4.4)
 cargo test -p craft-proof   # without Language data
 cargo check -p craft-proof --target wasm32-unknown-unknown
 ```
