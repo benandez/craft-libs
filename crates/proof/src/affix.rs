@@ -319,6 +319,10 @@ pub struct AffixDict {
     only_in_compound: Mask,
     /// `COMPOUNDMIN`, in characters.
     compound_min: usize,
+    /// The first characters of the stems a compound part can be (their flags are in a
+    /// `COMPOUNDRULE`), so a word starting otherwise is no compound: SCOWL's ordinals start with
+    /// a digit, and a misspelled word costs one lookup here instead of one per cut.
+    compound_firsts: Vec<char>,
 }
 
 fn hash_str(s: &str) -> u64 {
@@ -722,6 +726,7 @@ impl AffixDict {
             ..AffixDict::default()
         };
         d.offs.push(0);
+        let compound_flags = d.compound_rules.iter().flatten().fold(Mask::EMPTY, |m, (bit, _)| m | *bit);
         let mut set_ids: HashMap<Mask, u16> = HashMap::new();
         let mut i = 0;
         while i < stems.len() {
@@ -738,6 +743,12 @@ impl AffixDict {
             let id = *set_ids.entry(mask).or_insert(next_id);
             if usize::from(id) == d.sets.len() {
                 d.sets.push(mask);
+            }
+            if mask.meets(compound_flags)
+                && let Some(c) = word.chars().next()
+                && !d.compound_firsts.contains(&c)
+            {
+                d.compound_firsts.push(c);
             }
             d.words.push_str(word);
             d.offs.push(u32::try_from(d.words.len()).map_err(|_| "stems too large".to_string())?);
@@ -1002,26 +1013,35 @@ impl AffixDict {
     /// Is `w` a compound of two or more stems (no affixes) whose flags spell out one of the
     /// `COMPOUNDRULE` patterns, each part at least `COMPOUNDMIN` characters? `21st` is `2/m` +
     /// `1st/p` under `n*mp`. A dynamic programme over (byte offset, token, parts so far), so a
-    /// hostile pattern costs at most a few thousand lookups.
+    /// hostile pattern costs at most a few thousand lookups. A forbidden word is never rebuilt
+    /// from its parts.
     fn compound(&self, w: &str, deny: Mask) -> bool {
-        if self.compound_rules.is_empty() || w.len() > MAX_COMPOUND_BYTES {
+        if self.compound_rules.is_empty()
+            || w.len() > MAX_COMPOUND_BYTES
+            || !w.chars().next().is_some_and(|c| self.compound_firsts.contains(&c))
+            || self.stem_mask(w).is_some_and(|m| m.meets(self.forbidden))
+        {
             return false;
         }
         // Char boundaries of `w`, `0` and `w.len()` included.
         let cuts: Vec<usize> = w.char_indices().map(|(i, _)| i).chain(std::iter::once(w.len())).collect();
         let n = cuts.len();
-        // Flag mask of each part `w[cuts[a]..cuts[b]]` that is a stem, by (a, b).
-        let mut parts: Vec<Option<Mask>> = vec![None; n * n];
-        for a in 0..n {
-            for b in a.saturating_add(self.compound_min)..n {
-                let (Some(&x), Some(&y)) = (cuts.get(a), cuts.get(b)) else { continue };
-                let mask = w.get(x..y).and_then(|p| self.stem_mask(p)).filter(|m| !m.meets(self.forbidden | deny));
-                if let Some(slot) = parts.get_mut(a * n + b) {
-                    *slot = mask;
-                }
+        // Flag mask of each part `w[cuts[a]..cuts[b]]`, by (a, b), looked up when a rule first
+        // reaches cut `a` (`None`: not looked up yet; `Some(None)`: not a stem). Only the parts
+        // after a cut a rule reaches are looked up, so a word with no first part costs `n`.
+        let mut parts: Vec<Option<Option<Mask>>> = vec![None; n * n];
+        let min = self.compound_min;
+        let mut part = |a: usize, b: usize| -> Option<Mask> {
+            if b < a.saturating_add(min) {
+                return None;
             }
-        }
-        self.compound_rules.iter().any(|rule| compound_matches(rule, &parts, n))
+            let slot = parts.get_mut(a * n + b)?;
+            *slot.get_or_insert_with(|| {
+                let (Some(&x), Some(&y)) = (cuts.get(a), cuts.get(b)) else { return None };
+                w.get(x..y).and_then(|p| self.stem_mask(p)).filter(|m| !m.meets(self.forbidden | deny))
+            })
+        };
+        self.compound_rules.iter().any(|rule| compound_matches(rule, &mut part, n))
     }
 
     /// Is `w` a stem with one suffix? With `need` set (a prefix was taken off), the stem must
@@ -1259,11 +1279,13 @@ impl AffixDict {
         if !self.ignore.is_empty() {
             out.push_str(&format!("IGNORE {}\n", self.ignore.iter().collect::<String>()));
         }
+        if !self.only_in_compound.is_empty()
+            && let Some(c) = self.flag_char(self.only_in_compound)
+        {
+            out.push_str(&format!("ONLYINCOMPOUND {c}\n"));
+        }
         if !self.compound_text.is_empty() {
             out.push_str(&format!("COMPOUNDMIN {}\n", self.compound_min));
-            if let Some(c) = self.flag_char(self.only_in_compound) {
-                out.push_str(&format!("ONLYINCOMPOUND {c}\n"));
-            }
             for p in &self.compound_text {
                 out.push_str(&format!("COMPOUNDRULE {p}\n"));
             }
@@ -1403,11 +1425,10 @@ impl AffixDict {
     }
 }
 
-/// Does a compound rule's token list match a split of the word into two or more parts? `parts`
-/// holds, for each pair of char cuts `(a, b)` at `a * n + b`, the flags of the stem
-/// `w[a..b]` (`None`: not a stem). States are (cut, token, parts so far capped at 2), each
-/// visited once.
-fn compound_matches(rule: &[(Mask, Repeat)], parts: &[Option<Mask>], n: usize) -> bool {
+/// Does a compound rule's token list match a split of the word into two or more parts? `part(a,
+/// b)` is the flags of the stem between char cuts `a` and `b` (`None`: not a stem). States are
+/// (cut, token, parts so far capped at 2), each visited once.
+fn compound_matches(rule: &[(Mask, Repeat)], part: &mut impl FnMut(usize, usize) -> Option<Mask>, n: usize) -> bool {
     let t = rule.len();
     let idx = |cut: usize, tok: usize, k: usize| (cut * (t + 1) + tok) * 3 + k;
     let mut seen = vec![false; n * (t + 1) * 3];
@@ -1428,7 +1449,7 @@ fn compound_matches(rule: &[(Mask, Repeat)], parts: &[Option<Mask>], n: usize) -
             stack.push((cut, tok + 1, k));
         }
         for next in cut + 1..n {
-            if parts.get(cut * n + next).copied().flatten().is_some_and(|m| m.meets(bit)) {
+            if part(cut, next).is_some_and(|m| m.meets(bit)) {
                 let k = (k + 1).min(2);
                 stack.push((next, if repeat == Repeat::Any { tok } else { tok + 1 }, k));
             }
@@ -1961,6 +1982,24 @@ pub(crate) mod tests {
         assert!(!d.check("abcd"), "parts shorter than COMPOUNDMIN 3");
         let d = AffixDict::from_hunspell(&format!("{aff}COMPOUNDMIN 2\n"), "2\nab/ab\ncd/a\n", &[]).unwrap();
         assert!(d.check("cdab"));
+    }
+
+    /// craft-libs#483 review: a forbidden word isn't rebuilt from its parts.
+    #[test]
+    fn compound_never_rebuilds_a_forbidden_word() {
+        let d = AffixDict::from_hunspell("SET UTF-8\nFORBIDDENWORD X\nCOMPOUNDMIN 1\nCOMPOUNDRULE a*\n", "2\nx/a\nxx/X\n", &[]).unwrap();
+        assert!(!d.check("xx") && d.check("xxx") && d.check("x"));
+        let back = AffixDict::from_bytes(&d.to_bytes()).unwrap();
+        assert!(!back.check("xx") && back.check("xxx"));
+    }
+
+    /// craft-libs#483 review: `ONLYINCOMPOUND` survives a round trip without compound rules too.
+    #[test]
+    fn onlyincompound_round_trips_without_compound_rules() {
+        let d = AffixDict::from_hunspell("SET UTF-8\nONLYINCOMPOUND c\n", "2\nfoo\nqux/c\n", &[]).unwrap();
+        assert!(d.check("foo") && !d.check("qux"));
+        let back = AffixDict::from_bytes(&d.to_bytes()).unwrap();
+        assert!(back.check("foo") && !back.check("qux"), "a part-only stem stays a part");
     }
 
     #[test]

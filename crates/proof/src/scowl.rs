@@ -4,10 +4,11 @@
 //!
 //! Each English has its own: American English reads en-US, the British-spelling Englishes
 //! (en-GB, en-AU, en-NZ, en-IE…) read en-GB and Canadian English reads en-CA. Its suggestions
-//! come from its own dictionary. A word is right when any of the three knows it, unless
-//! `en-variants.txt` says it is the other dialect's spelling: SCOWL picks one spelling per
-//! dialect (en-GB `-ise` has no `organize`, en-US no `judgement`), and Word accepts more. An
-//! English dictionary in the dictionaries folder comes first; a SCOWL dictionary that isn't
+//! come from its own dictionary, and a word is right when its own dictionary knows it: the other
+//! dialects' dictionaries are never asked (en-US would take `colourblind` from en-GB's). SCOWL
+//! picks one spelling per dialect (en-GB `-ise` has no `organize`, en-US no `judgement`), and Word
+//! accepts more, so British English also takes the `-ize` spellings of its `-ise` words, and
+//! `en-variants.txt` widens each dialect by its pairs (`crate::english`). An English dictionary in the dictionaries folder comes first; a SCOWL dictionary that isn't
 //! embedded, or fails to load, leaves that English to the next source (`crate::english`).
 //!
 //! SCOWL is under its own permissive licence and the affix files under Ispell's BSD licence;
@@ -48,18 +49,9 @@ pub(crate) fn dict(lang: ProofLang) -> Option<&'static AffixDict> {
     loaded.as_ref().ok()
 }
 
-/// Every embedded SCOWL dictionary that loads, `lang`'s first: the shared English word list the
-/// dialect policy (`en-variants.txt`) is applied to.
-pub(crate) fn all(lang: ProofLang) -> Vec<&'static AffixDict> {
-    let mut out: Vec<&'static AffixDict> = dict(lang).into_iter().collect();
-    for other in [ProofLang::En, ProofLang::EnGb, ProofLang::EnCa] {
-        if source(other).0 != source(lang).0
-            && let Some(d) = dict(other)
-        {
-            out.push(d);
-        }
-    }
-    out
+/// Does `lang` read the British `-ise` dictionary (en-GB, en-AU, en-NZ…)?
+pub(crate) fn is_british(lang: ProofLang) -> bool {
+    source(lang).0 == 1
 }
 
 /// Why `lang`'s embedded SCOWL dictionary failed to load, once something tried to load it.

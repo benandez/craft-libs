@@ -614,8 +614,9 @@ pub(crate) fn accepted_by_options(word: &str, opts: &Options) -> bool {
         || in_user_dictionary(&w.to_lowercase())
 }
 
-/// [`is_correct`] with the File › Options › Proofing choices: against American English's
-/// dictionary ([`english_source`]), without the dialect policy.
+/// [`is_correct`] with the File › Options › Proofing choices: English with no dialect, so a word
+/// any English spells so is right (`color` and `colour`; American English's dictionary when it
+/// isn't SCOWL: [`english_source`]), without the dialect policy.
 pub fn is_correct_with(word: &str, opts: &Options) -> bool {
     english::is_correct(word, ProofLang::En, opts, false)
 }
@@ -1667,7 +1668,6 @@ mod tests {
             assert!(d.len() > 40_000, "{l:?}: {} stems", d.len());
             assert_eq!(english_source(l), Some(EnglishSource::Embedded));
             assert_eq!(dictionary_load_error(l), None);
-            assert_eq!(scowl::all(l).len(), 3);
         }
         assert!(std::ptr::eq(scowl::dict(ProofLang::EnGb).unwrap(), scowl::dict(ProofLang::from_tag(Some("en-AU"))).unwrap()), "en-AU reads en-GB");
         let notice = scowl::notice().unwrap();
@@ -1694,6 +1694,34 @@ mod tests {
         assert_eq!(suggest_in("color", 5, ProofLang::EnGb).first().map(String::as_str), Some("colour"));
     }
 
+    /// craft-libs#483 review: English suggestions offer a missing space only between two
+    /// lower-case words of three letters or more, after every one-word candidate, and no word the
+    /// dictionary only has capitalized (`Col`, `Wis`) for a lower-case word.
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
+    #[test]
+    fn english_suggestions_skip_junk_splits_and_names() {
+        for (w, l) in [
+            ("colour", ProofLang::En),
+            ("theatr", ProofLang::En),
+            ("publically", ProofLang::En),
+            ("cheque", ProofLang::En),
+            ("colr", ProofLang::En),
+            ("wiss", ProofLang::En),
+            ("theatr", ProofLang::EnGb),
+        ] {
+            let got = suggest_in(w, 8, l);
+            assert!(!got.is_empty(), "{w}");
+            assert!(got.iter().all(|s| !s.chars().any(char::is_uppercase)), "{w} in {l:?}: {got:?}");
+            let first_split = got.iter().position(|s| s.contains(' ')).unwrap_or(got.len());
+            assert!(got.iter().skip(first_split).all(|s| s.contains(' ')), "{w}: a split before a word: {got:?}");
+            assert!(got.iter().filter(|s| s.contains(' ')).all(|s| s.split(' ').all(|p| p.chars().count() >= 3)), "{w}: {got:?}");
+        }
+        assert_eq!(suggest_in("publically", 5, ProofLang::En).first().map(String::as_str), Some("publicly"));
+        assert_eq!(suggest_in("colour", 5, ProofLang::En).first().map(String::as_str), Some("color"));
+        assert_eq!(suggest_in("theatr", 5, ProofLang::EnGb).first().map(String::as_str), Some("theatre"));
+        assert!(suggest_in("Londn", 5, ProofLang::En).contains(&"London".to_string()), "a capitalized word may get a name");
+    }
+
     /// `en-variants.txt` stays with SCOWL: SCOWL's size-60 lists keep one spelling per dialect,
     /// and Word accepts more (both `-ize` and `-ise` in British English, `judgement` in American).
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
@@ -1705,6 +1733,52 @@ mod tests {
         assert!(is_correct_in("organize", ProofLang::EnGb) && is_correct_in("organise", ProofLang::EnGb));
         assert!(is_correct_in("judgement", ProofLang::En) && !is_correct_in("colour", ProofLang::En));
         assert!(is_correct_in("encyclopaedia", ProofLang::EnGb) && is_correct_in("encyclopedia", ProofLang::EnGb));
+    }
+
+    /// craft-libs#483 review: each English checks against its own SCOWL dictionary only. A stem
+    /// one English's dictionary has and another's lacks (`colourblind`, `greyscale` in en-GB;
+    /// `colorblind`, `esophagi` in en-US) doesn't cross, unless our dialect policy or the `-ize`
+    /// spellings of British English say so. Sampled from every pair of Englishes.
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
+    #[test]
+    fn scowl_dialects_dont_cross() {
+        let langs = [
+            (ProofLang::En, crate::data::EN_US_SPELLING),
+            (ProofLang::EnGb, crate::data::EN_GB_SPELLING),
+            (ProofLang::EnCa, crate::data::EN_CA_SPELLING),
+        ];
+        for (from, dic) in langs {
+            for (to, _) in langs {
+                if from == to {
+                    continue;
+                }
+                let d = scowl::dict(to).unwrap();
+                let widened = |w: &str| {
+                    let x = english::ise_spelling(w);
+                    (scowl::is_british(to) && x.as_deref().is_some_and(|x| d.check(x)))
+                        || en_variants::known_variant(w, to, |x| d.check(x))
+                        || known_in_supplement(w)
+                };
+                let only: Vec<&str> = dic
+                    .lines()
+                    .skip(1)
+                    .map(|l| l.split('/').next().unwrap_or_default())
+                    .filter(|w| w.len() > 3 && w.chars().all(|c| c.is_ascii_lowercase()) && !d.check(w) && !widened(w))
+                    .collect();
+                assert!(only.len() >= 40, "{from:?} → {to:?}: {}", only.len());
+                let step = only.len() / 40;
+                let crossed: Vec<&str> = only.iter().step_by(step.max(1)).copied().filter(|w| is_correct_in(w, to)).collect();
+                assert!(crossed.is_empty(), "{from:?} words right in {to:?}: {crossed:?}");
+            }
+        }
+        for (w, l) in [("colourblind", ProofLang::En), ("greyscale", ProofLang::En), ("colorblind", ProofLang::EnGb), ("esophagi", ProofLang::EnGb)] {
+            assert!(!is_correct_in(w, l), "{w} in {l:?}");
+        }
+        for (w, l) in
+            [("colorblind", ProofLang::En), ("colourblind", ProofLang::EnGb), ("organizational", ProofLang::EnGb), ("realized", ProofLang::EnGb)]
+        {
+            assert!(is_correct_in(w, l), "{w} in {l:?}");
+        }
     }
 
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]

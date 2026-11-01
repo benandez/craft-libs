@@ -13,7 +13,7 @@ craft-proof = { git = "https://github.com/storytold/craft-libs", rev = "<commit>
 
 | Language | Spelling | Grammar | Hyphenation |
 |---|---|---|---|
-| English (en-US, en-GB and the British-spelling Englishes such as en-AU, en-CA) | SCOWL 2026 Hunspell dictionary per English + `en-extra.txt`, dialect policy (`en-variants.txt`); a dictionaries-folder English first; without SCOWL the installed Hunspell English, else the built-in Moby list ([below](#english-is-always-checked)) | yes | Moby list, our patterns, heuristic |
+| English (en-US, en-CA, en-GB and the British-spelling Englishes such as en-AU, en-NZ) | SCOWL 2026 Hunspell dictionary per English + `en-extra.txt`, dialect policy (`en-variants.txt`); a dictionaries-folder English first; without SCOWL the installed Hunspell English, else the built-in Moby list ([below](#english-is-always-checked)) | yes | Moby list, our patterns, heuristic |
 | Polish, Portuguese, Italian | the installed Hunspell dictionary | yes | TeX patterns |
 | Croatian, Turkish, Russian, Czech, Indonesian, Spanish (es, es-MX, es-419, es-UY) | the installed Hunspell dictionary (Russian also `ru-extra.txt`) | yes | Turkish and Russian rules; English fallback otherwise |
 | German | — | — | TeX patterns |
@@ -70,11 +70,16 @@ English spelling uses the first of these that is there; `english_source(lang)` s
 3. **Embedded SCOWL:** the English's own SCOWL `rel-2026.02.25` Hunspell dictionary from
    `CRAFT_I18N_DIR` (`language-data/en-us`, `en-gb` (British `-ise`) or `en-ca`, `spelling.aff` +
    `spelling.dic`), read by the affix engine. en-AU, en-NZ, en-IE and the other British-spelling
-   Englishes read en-GB. Suggestions come from the English's own dictionary; a word is right when
-   any of the three knows it (or `en-extra.txt` does), unless `en-variants.txt` says it is the other
-   dialect's spelling, and this dialect's spellings of their words are right too. SCOWL's size-60
-   lists keep one spelling per dialect, and Word accepts more (`organize` and `organise` in
-   British English), so `en-variants.txt` stays. With SCOWL embedded the system locations aren't
+   Englishes read en-GB; Canadian English reads en-CA. A word is right when the English's own
+   dictionary knows it (or `en-extra.txt` does), never because another English's does
+   (`colourblind` is wrong in en-US, `colorblind` in en-GB); suggestions come from the same
+   dictionary. SCOWL's size-60 lists keep one spelling per dialect, and Word accepts more, so
+   British English also takes the `-ize` spellings of its `-ise` words (`organize`,
+   `realization`), and `en-variants.txt` flags the other dialect's spellings and accepts this
+   dialect's other spellings of known words (`judgement` in en-US). English with no dialect
+   (`is_correct`) takes a word any of the three knows. Suggestions offer a missing space only
+   between two lower-case words of three letters or more, after every one-word candidate, and no
+   name or abbreviation (`Col`) for a lower-case word. With SCOWL embedded the system locations aren't
    searched.
 4. **System Hunspell:** the English's own pair in the system locations. Never another English's:
    an `en_US` dictionary would mark British spellings, so en-GB and en-CA without their own use

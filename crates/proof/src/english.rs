@@ -5,8 +5,10 @@
 //!    `WORDCRAFT_DICTIONARIES`, WordCraft's own `dictionaries` folder).
 //! 2. **Installed English pack**: reserved for Language packs (craft-libs#485, CP4.2).
 //! 3. **Embedded SCOWL**: the run's English's SCOWL dictionary (en-US, en-GB or en-CA) embedded
-//!    from craft-i18n at build time ([`crate::scowl`]); a word any of the three knows, or the
-//!    supplement ([`EXTRA`]), is right. When it is there, the system locations aren't searched.
+//!    from craft-i18n at build time ([`crate::scowl`]); a word it knows (British English: also
+//!    the `-ize` spelling of one it knows, [`ise_spelling`]), or the supplement ([`EXTRA`]), is
+//!    right; never one only another English knows. When it is there, the system locations aren't
+//!    searched.
 //! 4. **System Hunspell**: a pair for the run's own English in the system locations (none on the
 //!    web).
 //! 5. **Built-in word list**: [`WORDS`], the whole public-domain Moby word list compiled into
@@ -32,6 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
 use crate::affix::AffixDict;
+use crate::affix_suggest::{Split, Tuning};
 use crate::dict::Dictionary;
 use crate::{Options, ProofLang};
 
@@ -242,7 +245,7 @@ pub(crate) fn reload() {
 pub(crate) fn source(lang: ProofLang) -> EnglishSource {
     match speller(lang) {
         Speller::Hunspell(_, dic) => EnglishSource::Hunspell(dic),
-        Speller::Scowl(_) => EnglishSource::Embedded,
+        Speller::Scowl(..) => EnglishSource::Embedded,
         Speller::List => EnglishSource::CoreList,
     }
 }
@@ -257,8 +260,9 @@ pub(crate) fn load_error(lang: ProofLang) -> Option<String> {
 enum Speller {
     /// A dictionaries-folder or system Hunspell dictionary, and its `.dic` file.
     Hunspell(Arc<AffixDict>, PathBuf),
-    /// The SCOWL dictionaries, `lang`'s first ([`crate::scowl::all`]).
-    Scowl(Vec<&'static AffixDict>),
+    /// `lang`'s own SCOWL dictionary (every English's, for English with no dialect: [`generic`]),
+    /// and whether British `-ize` spellings are right too ([`ise_spelling`]).
+    Scowl(Vec<&'static AffixDict>, bool),
     /// The built-in word list.
     List,
 }
@@ -274,8 +278,22 @@ fn pick(found: Loaded, lang: ProofLang) -> Speller {
     if let Some((d, dic)) = found {
         return Speller::Hunspell(d, dic);
     }
-    let scowl = crate::scowl::all(lang);
-    if crate::scowl::dict(lang).is_some() && !scowl.is_empty() { Speller::Scowl(scowl) } else { Speller::List }
+    match crate::scowl::dict(lang) {
+        Some(d) => Speller::Scowl(vec![d], crate::scowl::is_british(lang)),
+        None => Speller::List,
+    }
+}
+
+/// [`speller`] for English with no dialect ([`crate::is_correct`]): a SCOWL word of any English
+/// is right, as in the built-in list, which has both spellings.
+fn generic(s: Speller) -> Speller {
+    match s {
+        Speller::Scowl(..) => {
+            let all: Vec<_> = [ProofLang::En, ProofLang::EnGb, ProofLang::EnCa].into_iter().filter_map(crate::scowl::dict).collect();
+            Speller::Scowl(all, true)
+        }
+        other => other,
+    }
 }
 
 impl Speller {
@@ -283,7 +301,7 @@ impl Speller {
     fn knows(&self, w: &str) -> bool {
         match self {
             Speller::Hunspell(d, _) => affix_correct(&[d.as_ref()], w, false),
-            Speller::Scowl(ds) => affix_correct(ds, w, true),
+            Speller::Scowl(ds, ise) => affix_correct(ds, w, true) || (*ise && ise_spelling(w).is_some_and(|x| affix_correct(ds, &x, true))),
             Speller::List => list_correct(w),
         }
     }
@@ -292,13 +310,14 @@ impl Speller {
     fn knows_lower(&self, p: &str) -> bool {
         match self {
             Speller::Hunspell(d, _) => d.check(p),
-            Speller::Scowl(ds) => ds.iter().any(|d| d.check(p)),
+            Speller::Scowl(ds, ise) => ds.iter().any(|d| d.check(p) || (*ise && ise_spelling(p).is_some_and(|x| d.check(&x)))),
             Speller::List => crate::known_in_word_list(p),
         }
     }
 }
 
-/// Is `word` spelled right in `lang` (an English), against its dictionary ([`speller`]); with
+/// Is `word` spelled right in `lang` (an English), against its own dictionary ([`speller`]); with
+/// `policy` false, English with no dialect: any English's SCOWL dictionary ([`generic`]). With
 /// `policy`, also by the dialect policy of `en-variants.txt`: the other dialect's spellings are
 /// wrong and this dialect's spellings of known words right. The user dictionary overrules both.
 pub(crate) fn is_correct(word: &str, lang: ProofLang, opts: &Options, policy: bool) -> bool {
@@ -312,9 +331,34 @@ pub(crate) fn is_correct(word: &str, lang: ProofLang, opts: &Options, policy: bo
     if policy && parts.iter().any(|p| crate::en_variants::is_foreign(p, lang)) {
         return false;
     }
-    let s = speller(lang);
+    let s = if policy { speller(lang) } else { generic(speller(lang)) };
     s.knows(&w)
         || (policy && !parts.is_empty() && parts.iter().all(|p| s.knows_lower(p) || crate::en_variants::known_variant(p, lang, |x| s.knows_lower(x))))
+}
+
+/// `w` with its `-ize`/`-yze` endings (and their forms: `-ization`, `-izing`…) spelled `-ise`/
+/// `-yse`, when it has any: British English takes both (Word accepts `organize` and `organise` in
+/// en-GB), and SCOWL's en-GB dictionary has only `-ise`. A `z` between `i`/`y` and a vowel is
+/// swapped (`citizen` → `citisen`, which no dictionary knows, so that does no harm).
+pub(crate) fn ise_spelling(w: &str) -> Option<String> {
+    let b = w.as_bytes();
+    let mut out = b.to_vec();
+    let mut changed = false;
+    for i in 1..b.len() {
+        let after = b.get(i + 1).is_some_and(|c| b"aeiAEI".contains(c));
+        if after
+            && matches!(b.get(i - 1), Some(b'i' | b'y' | b'I' | b'Y'))
+            && let Some(c) = out.get_mut(i)
+        {
+            match *c {
+                b'z' => *c = b's',
+                b'Z' => *c = b'S',
+                _ => continue,
+            }
+            changed = true;
+        }
+    }
+    if changed { String::from_utf8(out).ok() } else { None }
 }
 
 /// Against affix dictionaries (any of them): the word, or each part of a hyphenated one; with
@@ -343,10 +387,20 @@ fn list_correct(w: &str) -> bool {
 /// Spelling suggestions in `lang` (an English), from its dictionary ([`speller`]).
 pub(crate) fn suggest(word: &str, max: usize, lang: ProofLang) -> Vec<String> {
     match speller(lang) {
-        Speller::Hunspell(d, _) => crate::cs::suggest::suggest_in(&d, word, max),
-        Speller::Scowl(ds) => ds.first().map_or_else(Vec::new, |d| crate::cs::suggest::suggest_in(d, word, max)),
+        Speller::Hunspell(d, _) => crate::affix_suggest::suggest_in(&d, word, max, &TUNING),
+        Speller::Scowl(ds, _) => ds.first().map_or_else(Vec::new, |d| crate::affix_suggest::suggest_in(d, word, max, &TUNING)),
         Speller::List => list_suggest(word, max),
     }
+}
+
+/// English suggestions from an affix dictionary: its own tables, a missing space only between two
+/// words of three letters or more and after every one-word candidate (`publically` → `publicly`
+/// before `public ally`), and no abbreviation or name offered for a lower-case word (`col`, `Wis`).
+const TUNING: Tuning = Tuning { split: Split::Custom(split_cost), strict_case: true, ..Tuning::DEFAULT };
+
+/// The cost of a missing space in English ([`TUNING`]).
+fn split_cost(a: &str, b: &str) -> Option<u32> {
+    (a.chars().count() >= 3 && b.chars().count() >= 3).then_some(crate::affix_suggest::COST_SPLIT_LAST)
 }
 
 /// Letters an edit may add or put in a word's place.
@@ -527,8 +581,12 @@ mod tests {
             assert!(matches!(pick(Some((tiny.clone(), file.clone())), lang), Speller::Hunspell(_, p) if p == file), "{lang:?}");
             let fallback = pick(None, lang);
             if crate::scowl::dict(lang).is_some() {
-                assert!(matches!(&fallback, Speller::Scowl(ds) if ds.len() == 3), "{lang:?}");
-                assert!(fallback.knows("colour") && fallback.knows("color") && fallback.knows("21st") && !fallback.knows("becuase"));
+                assert!(
+                    matches!(&fallback, Speller::Scowl(ds, _) if ds.len() == 1 && std::ptr::eq(ds[0], crate::scowl::dict(lang).unwrap())),
+                    "{lang:?}"
+                );
+                assert!(fallback.knows("21st") && !fallback.knows("becuase"), "{lang:?}");
+                assert_eq!(fallback.knows("colour"), lang != ProofLang::En, "{lang:?}: its own dictionary only");
             } else {
                 assert!(matches!(fallback, Speller::List), "{lang:?}");
             }
