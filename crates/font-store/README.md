@@ -94,6 +94,8 @@ settings.json        the network setting and the sources the user added
 manifest.json        what is installed
 indexes/             the last indexes fetched: sources.json, <source>.json.gz, user-<hash>
 <family folder>/     the font files and the licence
+language-packs/      installed Language packs, one folder per locale
+language-packs.json  which Language packs are installed
 .staging/            downloads being installed
 .lock                held while the store changes
 ```
@@ -112,6 +114,33 @@ A Google Fonts family's folder is google/fonts' own folder name (`lato/`); anoth
 ## Telling the catalog
 
 The catalog scans the store folder. With `with_catalog(catalog)`, every install and removal ends with `catalog.rescan()`, which reads only new and changed files, so the app sees the fonts at once. Other running apps notice through `Catalog::rescan_if_changed` (when their window is activated) or `Catalog::watch`.
+
+## Language packs
+
+The store's second item kind, `language-pack`: a language's spelling dictionary, hyphenation patterns and licence texts, published by [storytold/craft-i18n](https://github.com/storytold/craft-i18n) as `<locale>.tar.zst` release assets listed in an `index.json`, and read at runtime by `craft-proof` (`craft_proof::packs`). It reuses the store's folder, consent, HTTP client, staging and sha256 checks; there is no second downloader.
+
+```rust
+const PACKS: PackIndexPin = PackIndexPin { url: "https://github.com/storytold/craft-i18n/releases/download/language-packs-1/index.json", sha256: "<hex>" };
+let index = store.fetch_language_pack_index(&PACKS, &Cancel::new())?;   // or cached_language_pack_index(&PACKS)
+let nl = index.pack("nl").unwrap();
+store.install_language_pack(&index, nl, &Cancel::new(), &mut |p| ())?;  // network on, like fonts
+craft_proof::packs::set_packs_dir(Some(store.language_packs_dir()));      // then packs::reload() after each change
+store.remove_language_pack("nl")?;
+let installed = store.installed_language_packs();
+```
+
+| Call | What it does |
+|---|---|
+| `fetch_language_pack_index(pin, cancel)` | Downloads the index, checks it against the pin's sha256, saves it as `indexes/language-packs.json`. Needs the network on. |
+| `cached_language_pack_index(pin)` | The saved index, when it is the pinned one. |
+| `install_language_pack(index, pack, cancel, progress)` | Downloads the archive (at most 128 MiB), checks size and sha256, unpacks it into `.staging/` and moves it into `language-packs/<locale>/` with one rename (an older pack is replaced the same way). Records it in `language-packs.json`. |
+| `remove_language_pack(locale)` | Moves the folder out at once, updates the record, deletes the files. No network needed. |
+| `installed_language_packs()` | The recorded packs whose folder is there. |
+| `language_packs_dir()` | `<store>/language-packs`, for `craft_proof::packs::set_packs_dir`. |
+
+**Unpacking is hostile-input safe:** pure-Rust zstd (`ruzstd`, MIT) and `tar` (MIT OR Apache-2.0); regular files and folders only (no links or devices), plain relative paths at most two levels deep (`LICENCES/<file>`), no `..`, roots, drives or backslashes, each file at most 64 MiB, 256 MiB and 256 entries per pack, `pack.toml` required. Index entries need a lowercase BCP 47 locale (listed once), a sha256 and an `https://` URL.
+
+**Developer override (testing only):** `CRAFT_LANGUAGE_PACK_INDEX=<url or path>` replaces the pinned index URL with an `http://` URL on a loopback host (`127.0.0.1`, `localhost`, `[::1]`), an `https://` URL or a local file path, and **skips the index's sha256 pin**. Archives are still checked against the sha256 and size in that index, and may then also be loopback `http://` URLs or local paths. Off unless the variable is set; a warning is logged whenever it is used. Never set it in a release.
 
 ## Web
 
