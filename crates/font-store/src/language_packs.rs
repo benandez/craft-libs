@@ -97,6 +97,9 @@ pub struct PackEntry {
     /// Whether it has hyphenation patterns.
     #[serde(default)]
     pub hyphenation: bool,
+    /// Where the data comes from (an `https://` page), for display; optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// An installed pack, as recorded when it was installed.
@@ -151,9 +154,18 @@ impl PackIndex {
             if !(p.url.starts_with("https://") || local && local_source(&p.url).is_some()) {
                 return Err(bad(format!("pack {}: {} is not an https URL", p.locale, p.url.chars().take(200).collect::<String>())));
             }
+            if let Some(src) = &p.source
+                && !(src.starts_with("https://") && src.len() <= 2048 && !src.chars().any(|c| c.is_control() || is_format(c) || c == ' '))
+            {
+                return Err(bad(format!("pack {}: source {:?} is not an https URL", p.locale, src.chars().take(200).collect::<String>())));
+            }
         }
+        // Text shown to people loses control and bidi/format characters.
+        index.release = plain_text(&index.release);
         for p in &mut index.packs {
-            p.name = plain_text(&p.name);
+            for t in [&mut p.name, &mut p.version, &mut p.licence, &mut p.class] {
+                *t = plain_text(t);
+            }
         }
         Ok(index)
     }
@@ -366,13 +378,15 @@ impl FontStore {
         let record = InstalledLanguagePack {
             locale: pack.locale.clone(),
             name: plain_text(&pack.name),
-            release: index.release.chars().take(200).collect(),
-            version: pack.version.chars().take(200).collect(),
-            licence: pack.licence.chars().take(200).collect(),
+            release: plain_text(&index.release),
+            version: plain_text(&pack.version),
+            licence: plain_text(&pack.licence),
             sha256: pack.sha256.clone(),
             size: pack.size,
         };
         let _lock = self.lock()?;
+        // The record first: rebuilding a damaged one must not count the pack being installed.
+        let mut installed = self.read_installed()?;
         let packs = self.language_packs_dir();
         std::fs::create_dir_all(&packs).map_err(io("creating the Language packs folder"))?;
         let dest = packs.join(&pack.locale);
@@ -387,7 +401,6 @@ impl FontStore {
             }
             return Err(io(format!("installing the {} pack", pack.locale))(e));
         }
-        let mut installed = self.read_installed()?;
         installed.packs.retain(|p| p.locale != record.locale);
         installed.packs.push(record.clone());
         installed.packs.sort_by(|a, b| a.locale.cmp(&b.locale));
@@ -410,7 +423,13 @@ impl FontStore {
             .packs
             .into_iter()
             .filter(|p| is_locale(&p.locale) && dir.join(&p.locale).is_dir())
-            .map(|p| InstalledLanguagePack { name: plain_text(&p.name), ..p })
+            .map(|p| InstalledLanguagePack {
+                name: plain_text(&p.name),
+                release: plain_text(&p.release),
+                version: plain_text(&p.version),
+                licence: plain_text(&p.licence),
+                ..p
+            })
             .collect()
     }
 
@@ -436,20 +455,24 @@ impl FontStore {
         // `stage` deletes the old folder when dropped.
     }
 
-    /// The record of installed packs (none yet: empty). One that can't be read is kept aside as
-    /// `language-packs.json.bad` and rebuilt from the pack folders on disk, so no installed pack
-    /// is ever dropped from it.
+    /// The record of installed packs. One that can't be read is copied aside as
+    /// `language-packs.json.bad` and rebuilt from the pack folders on disk (written atomically
+    /// over it), so no installed pack is ever dropped from it; a missing one is rebuilt the same
+    /// way when pack folders are there (none: empty).
     fn read_installed(&self) -> Result<Installed, Error> {
         let path = self.dir().join(INSTALLED);
-        if std::fs::symlink_metadata(&path).is_err() {
-            return Ok(Installed::default());
-        }
-        if let Some(i) = read_limited(&path, MAX_PACK_INDEX_BYTES).and_then(|b| serde_json::from_slice::<Installed>(&b).ok()) {
+        let there = std::fs::symlink_metadata(&path).is_ok();
+        if there && let Some(i) = read_limited(&path, MAX_PACK_INDEX_BYTES).and_then(|b| serde_json::from_slice::<Installed>(&b).ok()) {
             return Ok(i);
         }
-        log::warn!("{}: can't be read; rebuilt from the Language pack folders", path.display());
         let rebuilt = self.installed_from_disk();
-        let _ = std::fs::rename(&path, self.dir().join(format!("{INSTALLED}.bad")));
+        if !there && rebuilt.packs.is_empty() {
+            return Ok(Installed::default());
+        }
+        log::warn!("{}: {}; rebuilt from the Language pack folders", path.display(), if there { "can't be read" } else { "missing" });
+        if there {
+            let _ = std::fs::copy(&path, self.dir().join(format!("{INSTALLED}.bad")));
+        }
         self.write_installed(&rebuilt)?;
         Ok(rebuilt)
     }
@@ -495,11 +518,16 @@ impl FontStore {
 /// a concatenation of frames is a valid `.zst` too, and must not stop after the first).
 struct Frames<'a> {
     decoder: Option<ruzstd::decoding::StreamingDecoder<&'a [u8], ruzstd::decoding::FrameDecoder>>,
+    /// Frames started so far, empty ones included (at most [`MAX_PACK_FRAMES`]).
+    frames: usize,
 }
+
+/// Most zstd frames in a pack archive (`zstd` writes one; empty frames count too).
+const MAX_PACK_FRAMES: usize = 4096;
 
 impl<'a> Frames<'a> {
     fn new(archive: &'a [u8]) -> Result<Self, String> {
-        Ok(Self { decoder: Some(ruzstd::decoding::StreamingDecoder::new(archive).map_err(|e| format!("not zstd: {e}"))?) })
+        Ok(Self { decoder: Some(ruzstd::decoding::StreamingDecoder::new(archive).map_err(|e| format!("not zstd: {e}"))?), frames: 1 })
     }
 }
 
@@ -512,6 +540,12 @@ impl Read for Frames<'_> {
                 return Ok(n);
             }
             let rest: &[u8] = d.get_ref();
+            if !rest.is_empty() {
+                self.frames += 1;
+                if self.frames > MAX_PACK_FRAMES {
+                    return Err(std::io::Error::other(format!("more than {MAX_PACK_FRAMES} zstd frames")));
+                }
+            }
             self.decoder = if rest.is_empty() { None } else { Some(ruzstd::decoding::StreamingDecoder::new(rest).map_err(std::io::Error::other)?) };
         }
     }

@@ -348,6 +348,13 @@ fn hostile_archives_are_refused() {
     let dest = temp("frames").join("nl");
     unpack(&[zst(a), zst(b)].concat(), &dest, &nl).unwrap();
     assert!(dest.join("LICENCES/COPYING").is_file());
+    // Empty frames are read past, but only so many.
+    let one = zst(&tar_of(&[("pack.toml", FILE, toml)]));
+    let empty = zst(b"");
+    unpack(&[one.clone(), empty.clone(), empty.clone()].concat(), &temp("empties").join("nl"), &nl).unwrap();
+    let many: Vec<u8> = std::iter::once(one).chain(std::iter::repeat_n(empty, MAX_PACK_FRAMES)).flatten().collect();
+    let err = unpack(&many, &temp("frames-cap").join("nl"), &nl).unwrap_err();
+    assert!(err.contains("frames"), "{err}");
     // The index's promises are checked against the files.
     let bare = zst(&tar_of(&[("pack.toml", FILE, toml)]));
     for e in [PackEntry { spelling: true, ..nl.clone() }, PackEntry { hyphenation: true, ..nl.clone() }] {
@@ -389,11 +396,40 @@ fn a_corrupt_record_is_rebuilt_from_the_folders() {
     let mut locales: Vec<String> = store.installed_language_packs().into_iter().map(|p| p.locale).collect();
     locales.sort();
     assert_eq!(locales, ["de", "nl"]);
-    assert!(store.dir().join("language-packs.json.bad").is_file(), "the unreadable record is kept aside");
+    assert_eq!(std::fs::read(store.dir().join("language-packs.json.bad")).unwrap(), b"{ not json", "the unreadable record is kept aside");
+    assert!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(&record).unwrap()).is_ok(), "rebuilt in place");
+    // A missing record with pack folders is rebuilt too.
+    std::fs::remove_file(&record).unwrap();
+    assert_eq!(store.installed_language_packs().len(), 2);
+    let nl_again = PackEntry { url: format!("{RELEASE}nl.tar.zst"), ..nl.clone() };
+    std::fs::remove_file(&record).unwrap();
+    store.install_pack_from(false, &index, &nl_again, &Cancel::new(), &mut |_| {}).unwrap();
+    assert_eq!(store.installed_language_packs().len(), 2, "de kept when the record was missing");
     // Removing works on a rebuilt record too.
     std::fs::write(&record, b"\xff").unwrap();
     store.remove_language_pack("nl").unwrap();
     assert_eq!(store.installed_language_packs().into_iter().map(|p| p.locale).collect::<Vec<_>>(), ["de"]);
+}
+
+#[test]
+fn index_text_is_plain_and_sources_are_checked() {
+    let a = pack_archive("nl", "x");
+    let mut e = entry("nl", &format!("{RELEASE}nl.tar.zst"), &a);
+    e["licence"] = serde_json::json!("MIT\u{202e}");
+    e["version"] = serde_json::json!("ab\u{0}c");
+    e["class"] = serde_json::json!("\u{200f}Embeddable");
+    e["source"] = serde_json::json!("https://example.org/nl");
+    let json = serde_json::to_vec(&serde_json::json!({"format": 1, "release": "r1\u{2066}", "packs": [e.clone()]})).unwrap();
+    let index = PackIndex::from_json(&json).unwrap();
+    let p = &index.packs[0];
+    assert_eq!((index.release.as_str(), p.licence.as_str(), p.version.as_str(), p.class.as_str()), ("r1", "MIT", "abc", "Embeddable"));
+    assert_eq!(p.source.as_deref(), Some("https://example.org/nl"));
+    assert_eq!(PackIndex::from_json(&index_json(&[entry("nl", &format!("{RELEASE}nl.tar.zst"), &a)])).unwrap().packs[0].source, None);
+    for bad in ["javascript:alert(1)", "http://example.org", "https://a b", "https://a\u{202e}b"] {
+        e["source"] = serde_json::json!(bad);
+        let err = PackIndex::from_json(&index_json(std::slice::from_ref(&e))).unwrap_err();
+        assert!(!err.to_string().contains("font"), "{err}");
+    }
 }
 
 #[test]
@@ -413,8 +449,8 @@ fn the_override_is_visible() {
     assert_eq!(language_pack_index_overridden(), set);
 }
 
-/// A staging folder an earlier process with the same id left behind is cleared, so an unpack
-/// (`create_new`) can't fail on, or mix in, its files.
+/// A staging folder of the same name (an earlier process, or another one in a PID namespace) is
+/// never used or deleted: the next name is taken, so an unpack can't mix in its files.
 #[test]
 fn a_stale_stage_folder_is_cleared() {
     let store = temp("stale-stage");
@@ -426,4 +462,7 @@ fn a_stale_stage_folder_is_cleared() {
     }
     let stage = Stage::new(&store).unwrap();
     assert_eq!(std::fs::read_dir(&stage.dir).unwrap().count(), 0, "{}", stage.dir.display());
+    // The others are left alone: they may be another process's (PID namespaces).
+    let left = std::fs::read_dir(&staging).unwrap().flatten().filter(|e| e.path().join("nl/pack.toml").is_file()).count();
+    assert_eq!(left, 512);
 }

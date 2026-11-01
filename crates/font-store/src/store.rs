@@ -839,13 +839,21 @@ pub(crate) struct Stage {
 impl Stage {
     pub(crate) fn new(store: &Path) -> Result<Self, Error> {
         static N: AtomicU64 = AtomicU64::new(0);
-        let dir = store.join(STAGING).join(format!("{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
-        // A folder left by an earlier process with the same id is cleared, not mixed in.
-        if std::fs::symlink_metadata(&dir).is_ok() {
-            std::fs::remove_dir_all(&dir).map_err(io("clearing an old download folder"))?;
+        let staging = store.join(STAGING);
+        std::fs::create_dir_all(&staging).map_err(io("creating a download folder"))?;
+        // A folder of that name may be another process's (PID namespaces in Flatpak or
+        // containers repeat ids) or a stale one: never touched here, the next name is taken
+        // (stale ones go in `sweep_staging`).
+        let mut last = None;
+        for _ in 0..1000 {
+            let dir = staging.join(format!("{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return Ok(Self { dir }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+                Err(e) => return Err(io("creating a download folder")(e)),
+            }
         }
-        std::fs::create_dir_all(&dir).map_err(io("creating a download folder"))?;
-        Ok(Self { dir })
+        Err(io("creating a download folder")(last.unwrap_or_else(|| std::io::Error::other("no free name"))))
     }
 
     /// Writes a verified download as `<name>.part`, which no font scan picks up.
