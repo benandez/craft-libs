@@ -21,6 +21,7 @@
 //! link); a pack whose `pack.toml` is missing, unreadable or names a path outside the pack is
 //! skipped and reported by [`load_errors`]. Nothing here panics on a hostile pack.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -31,6 +32,8 @@ use crate::patterns::Patterns;
 pub(crate) const SPELLING: &str = "spelling";
 /// A pack's hyphenation patterns.
 const HYPHENATION: &str = "hyphenation.pat";
+/// Most languages whose pack patterns are remembered (a document may tag thousands).
+const MAX_HYPHENATION_LOOKUPS: usize = 256;
 /// A pack's description.
 const PACK_TOML: &str = "pack.toml";
 /// A pack's licence texts.
@@ -76,15 +79,16 @@ struct Holds {
 struct State {
     dir: Option<PathBuf>,
     scan: Option<Arc<Scan>>,
-    /// Each language's pack patterns once looked up (`None`: no pack has them).
-    hyphenation: Vec<(ProofLang, Option<Arc<Patterns>>)>,
+    /// Each language's pack patterns once looked up (`None`: no pack has them), at most
+    /// [`MAX_HYPHENATION_LOOKUPS`] languages (cleared when full).
+    hyphenation: BTreeMap<ProofLang, Option<Arc<Patterns>>>,
     /// (locale, reason) of pack hyphenation files that failed to load.
     hyphenation_errors: Vec<(String, String)>,
     /// Counts changes, so a scan or load that started before one is not kept.
     changes: u64,
 }
 
-static STATE: RwLock<State> = RwLock::new(State { dir: None, scan: None, hyphenation: Vec::new(), hyphenation_errors: Vec::new(), changes: 0 });
+static STATE: RwLock<State> = RwLock::new(State { dir: None, scan: None, hyphenation: BTreeMap::new(), hyphenation_errors: Vec::new(), changes: 0 });
 
 fn read() -> RwLockReadGuard<'static, State> {
     STATE.read().unwrap_or_else(PoisonError::into_inner)
@@ -148,21 +152,25 @@ pub fn licence_texts() -> Vec<(String, String)> {
     if !crate::data::EN_US_DIC.is_empty() {
         out.push(("English word list and hyphenation (Moby Hyphenator II)".into(), MOBY_NOTICE.into()));
     }
-    out.push(("English core word list".into(), CORE_LIST_NOTICE.into()));
+    out.push(("English word list built into craft-proof".into(), CORE_LIST_NOTICE.into()));
     out.extend(crate::data::EMBEDDED_LICENCES.iter().map(|(t, x)| ((*t).to_string(), (*x).to_string())));
-    let mut total: u64 = 0;
-    'packs: for (p, _) in &scan().packs {
-        for (file, text) in licence_files(&p.path) {
-            total = total.saturating_add(text.len() as u64);
-            if total > MAX_LICENCE_TOTAL {
-                log::warn!("Language pack licences: over {MAX_LICENCE_TOTAL} bytes in all; the rest aren't shown");
-                break 'packs;
-            }
+    // Each file is checked against what is left before it is read, so no more is ever read.
+    let mut left: u64 = MAX_LICENCE_TOTAL;
+    for (p, _) in &scan().packs {
+        for (file, text) in licence_files(&p.path, &mut left) {
             out.push((format!("{} ({}): {file}", p.name, p.locale), text));
+        }
+        if left == 0 {
+            log::warn!("Language pack licences: {MAX_LICENCE_TOTAL} bytes in all; the rest aren't shown");
+            break;
         }
     }
     out
 }
+
+/// Licence bytes read so far (tests check the cap holds while reading, not only after).
+#[cfg(test)]
+pub(crate) static LICENCE_BYTES_READ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Most bytes of pack licence text [`licence_texts`] reads in all.
 const MAX_LICENCE_TOTAL: u64 = 16 << 20;
@@ -171,9 +179,9 @@ const MAX_LICENCE_TOTAL: u64 = 16 << 20;
 const MOBY_NOTICE: &str = "The Moby Hyphenator II word list by Grady Ward (Project Gutenberg eBook #3204) is in the public domain. \
 The English hyphenation patterns were trained from it for the Craft apps and are distributed with them under MIT OR Apache-2.0.";
 
-/// The notice of the core word list built into the crate (`data/en-core.txt`).
-const CORE_LIST_NOTICE: &str = "The core English word list built into craft-proof is taken from the Moby Hyphenator II word list by Grady Ward \
-(public domain), ranked by public-domain Project Gutenberg books. It is in the public domain.";
+/// The notice of the word list built into the crate (`data/en-words.dic`).
+const CORE_LIST_NOTICE: &str = "The English word list built into craft-proof is the Moby Hyphenator II word list by Grady Ward \
+(Project Gutenberg eBook #3204), which is in the public domain.";
 
 /// The locales whose Language data is embedded in this build (`en-us`…, and in a Language build
 /// the ones it names; `CRAFT_PROOF_EMBED`).
@@ -354,7 +362,7 @@ fn read_capped(p: &Path, cap: u64) -> Result<Vec<u8>, String> {
 }
 
 /// The licence texts in a pack's `LICENCES/` folder, by file name.
-fn licence_files(pack: &Path) -> Vec<(String, String)> {
+fn licence_files(pack: &Path, left: &mut u64) -> Vec<(String, String)> {
     let dir = pack.join(LICENCES);
     if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
         return Vec::new();
@@ -370,7 +378,17 @@ fn licence_files(pack: &Path) -> Vec<(String, String)> {
     names
         .into_iter()
         .filter_map(|n| {
-            let bytes = read_capped(&dir.join(&n), MAX_LICENCE).ok()?;
+            let path = dir.join(&n);
+            let size = std::fs::symlink_metadata(&path).ok().filter(std::fs::Metadata::is_file)?.len();
+            if size > (*left).min(MAX_LICENCE) {
+                // Over what is left: none of the rest is read either.
+                *left = 0;
+                return None;
+            }
+            let bytes = read_capped(&path, size.min(MAX_LICENCE)).ok()?;
+            *left = left.saturating_sub(bytes.len() as u64);
+            #[cfg(test)]
+            LICENCE_BYTES_READ.fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
             Some((n, String::from_utf8_lossy(&bytes).into_owned()))
         })
         .collect()
@@ -426,12 +444,33 @@ fn packs_for(locales: &[String], has: impl Fn(&Holds) -> bool) -> Vec<PathBuf> {
 }
 
 /// The folders of the installed packs with a spelling dictionary for the Hunspell dictionary
-/// `names` (`pl_PL`, `pl`), best first ([`crate::hunspell::find`] reads them).
-pub(crate) fn spelling_dirs(names: &[&str]) -> Vec<PathBuf> {
+/// `names` (`pt_BR`, `pt-BR`, `pt`), best first ([`crate::hunspell::find`] reads them), in two
+/// tiers: the packs of the first name's own region (`pt-br`) or of the language alone (`pt`), then
+/// every other one (the other names' regions, then any other region of the language: `pt-pt`).
+/// The system's exact-region dictionaries are searched between the two, so another region's pack
+/// never beats them.
+pub(crate) fn spelling_dirs(names: &[&str]) -> (Vec<PathBuf>, Vec<PathBuf>) {
     if read().dir.is_none() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
-    packs_for(&locales_for(names), |h| h.spelling)
+    let all = packs_for(&locales_for(names), |h| h.spelling);
+    let region = region_locales(names);
+    let scan = scan();
+    let in_region = |path: &PathBuf| scan.packs.iter().any(|(p, _)| &p.path == path && region.contains(&p.locale));
+    all.into_iter().partition(in_region)
+}
+
+/// The pack locales of `names`' own region: the first name's (`pt_BR` → `pt-br`) and the language
+/// alone (`pt`) when it is written in the same script.
+pub(crate) fn region_locales(names: &[&str]) -> Vec<String> {
+    let Some(first) = names.first() else { return Vec::new() };
+    let mut out = vec![first.to_ascii_lowercase().replace('_', "-")];
+    let primary = first.split(['_', '-']).next().unwrap_or_default().to_ascii_lowercase();
+    if same_script(first, &primary) && !out.contains(&primary) {
+        out.push(primary);
+    }
+    out.retain(|l| is_locale(l));
+    out
 }
 
 /// The pack locales whose patterns hyphenate `lang`, best first; none for English (embedded)
@@ -465,7 +504,7 @@ pub(crate) fn hyphenation(lang: ProofLang) -> Option<Arc<Patterns>> {
     let changes = {
         let s = read();
         s.dir.as_ref()?;
-        if let Some((_, p)) = s.hyphenation.iter().find(|(l, _)| *l == lang) {
+        if let Some(p) = s.hyphenation.get(&lang) {
             return p.clone();
         }
         s.changes
@@ -486,8 +525,12 @@ pub(crate) fn hyphenation(lang: ProofLang) -> Option<Arc<Patterns>> {
         }
     }
     let mut s = write();
-    if s.changes == changes && !s.hyphenation.iter().any(|(l, _)| *l == lang) {
-        s.hyphenation.push((lang, found.clone()));
+    if s.changes == changes && !s.hyphenation.contains_key(&lang) {
+        // ponytail: cleared when full, an LRU if many languages each need their patterns.
+        if s.hyphenation.len() >= MAX_HYPHENATION_LOOKUPS {
+            s.hyphenation.clear();
+        }
+        s.hyphenation.insert(lang, found.clone());
         for e in errors {
             if !s.hyphenation_errors.contains(&e) {
                 s.hyphenation_errors.push(e);
@@ -495,6 +538,12 @@ pub(crate) fn hyphenation(lang: ProofLang) -> Option<Arc<Patterns>> {
         }
     }
     found
+}
+
+/// How many languages' pack patterns are remembered now.
+#[cfg(test)]
+pub(crate) fn hyphenation_lookups() -> usize {
+    read().hyphenation.len()
 }
 
 /// A pack's `hyphenation.pat` (UTF-8 TeX or plain Liang patterns, at most the dictionary cap).
@@ -534,6 +583,10 @@ mod tests {
     #[test]
     fn dictionary_names_map_to_pack_locales() {
         assert_eq!(locales_for(&["pt_BR", "pt-BR", "pt"]), ["pt-br", "pt"]);
+        assert_eq!(region_locales(&["pt_BR", "pt-BR", "pt"]), ["pt-br", "pt"]);
+        assert_eq!(region_locales(&["en_US", "en-US", "en", "en_GB"]), ["en-us", "en"]);
+        assert_eq!(region_locales(&["sr_Latn", "sr-Latn"]), ["sr-latn"]);
+        assert!(region_locales(&[]).is_empty());
         assert_eq!(locales_for(&["es_419", "es"]), ["es-419", "es"]);
         assert_eq!(locales_for(&["../x", "a b"]), Vec::<String>::new());
     }

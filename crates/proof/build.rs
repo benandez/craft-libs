@@ -102,7 +102,7 @@ fn main() {
         wanted_files += usize::from(wanted);
         let file = dir.as_ref().filter(|_| wanted).map(|d| d.join(rel)).filter(|f| f.is_file());
         if let (Some(d), None, true) = (&dir, &file, wanted) {
-            println!("cargo::{level}=CRAFT_I18N_DIR: {} is missing; craft-proof embeds none", d.join(rel).display());
+            println!("cargo::{level}=CRAFT_I18N_DIR: {} is missing; craft-proof embeds the rest without it", d.join(rel).display());
         }
         let (ty, empty, mac) = if bytes { ("&[u8]", "b\"\"", "include_bytes") } else { ("&str", "\"\"", "include_str") };
         // `language_data` only hands back a UTF-8 folder, so this is the path as it is.

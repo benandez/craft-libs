@@ -76,6 +76,8 @@ mod checker_tests {
 
     #[test]
     fn vietnamese_paragraphs_under_english_get_no_marks() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let text = "Hôm nay tôi đi học, trời rất đẹp và mát mẻ.";
         let spans = [(0..text.len(), ProofLang::En)];
         assert!(check_text_with(text, &spans, &Options::default(), true, false).is_empty());

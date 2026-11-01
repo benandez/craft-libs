@@ -119,7 +119,8 @@ fn is_apostrophe(c: char) -> bool {
 }
 
 fn is_word_char(c: char) -> bool {
-    c.is_alphabetic() || is_apostrophe(c)
+    // A combining mark belongs to its letter (decomposed `a` + U+0301 is one letter, `á`).
+    c.is_alphabetic() || is_apostrophe(c) || unicode_normalization::char::is_combining_mark(c)
 }
 
 /// Unrestricted break points of one lowercase core (letters and `'` only, no leading/trailing `'`).
@@ -182,6 +183,26 @@ fn core_breaks(core: &[char], lang: ProofLang) -> (Vec<usize>, Source) {
         return (p, Source::Patterns);
     }
     (heuristic_points(core), Source::Heuristic)
+}
+
+/// `core` composed (NFC), with the index in `core` where each composed character's base starts
+/// (`None` for a character that isn't the first of its base's group). Never longer than `core`.
+fn composed_chars(core: &[char]) -> (Vec<char>, Vec<Option<usize>>) {
+    use unicode_normalization::UnicodeNormalization;
+    use unicode_normalization::char::is_combining_mark;
+    let mut nfc: Vec<char> = Vec::with_capacity(core.len());
+    let mut starts: Vec<Option<usize>> = Vec::with_capacity(core.len());
+    let mut i = 0;
+    while i < core.len() {
+        let end = core.get(i + 1..).and_then(|rest| rest.iter().position(|&c| !is_combining_mark(c))).map_or(core.len(), |n| i + 1 + n);
+        let group: String = core.get(i..end).unwrap_or_default().iter().collect();
+        for (k, c) in group.nfc().enumerate() {
+            nfc.push(c);
+            starts.push((k == 0).then_some(i));
+        }
+        i = end;
+    }
+    (nfc, starts)
 }
 
 /// Does a pack's `pats` hyphenate `core` in `lang`? Russian, Bulgarian and Turkish: a word in
@@ -249,6 +270,16 @@ pub fn word_breaks(word: &str) -> (Vec<usize>, Source) {
 /// run is hyphenated separately). No break is ever placed next to an apostrophe or non-letter.
 pub fn word_breaks_in(word: &str, lang: ProofLang) -> (Vec<usize>, Source) {
     let chars: Vec<char> = word.chars().collect();
+    // Patterns are composed text (NFC), as spelling reads words: a decomposed word (`a` + U+0301)
+    // is hyphenated composed, and the breaks mapped back to its own chars.
+    if unicode_normalization::is_nfc_quick(word.chars()) != unicode_normalization::IsNormalized::Yes {
+        let (nfc, starts) = composed_chars(&chars);
+        if nfc.len() < chars.len() {
+            let composed: String = nfc.iter().collect();
+            let (pts, src) = word_breaks_in(&composed, lang);
+            return (pts.into_iter().filter_map(|i| starts.get(i).copied().flatten()).collect(), src);
+        }
+    }
     let mut out = Vec::new();
     let mut src = Source::None;
     let mut i = 0;

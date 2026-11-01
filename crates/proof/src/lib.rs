@@ -601,14 +601,43 @@ pub fn unreadable_dictionary(lang: Option<&str>) -> Option<(&'static str, std::p
 
 /// Did the Hunspell dictionary of `lang` load? `None` for languages that use none (English).
 fn dictionary_loaded(lang: ProofLang) -> Option<bool> {
+    if let Some(l) = lang.spelling_locale() {
+        return Some(pack_lang::has_dictionary(l));
+    }
     language(lang).map(|l| l.slot.has_dictionary())
 }
 
 /// The Hunspell name `lang` needs when `installed` is false (the first name its module looks for;
 /// a Spanish variety's is its own: `es_ES`, `es_MX`, `es_419`, `es_UY`).
 fn dictionary_needed(lang: ProofLang, installed: bool) -> Option<&'static str> {
-    language(lang).filter(|_| !installed).map(|l| l.slot.name())
+    if installed {
+        return None;
+    }
+    if let Some(l) = lang.spelling_locale() {
+        return pack_lang::names(l).first().and_then(|n| interned(n));
+    }
+    language(lang).map(|l| l.slot.name())
 }
+
+/// `name` as a `&'static str` (the API hands out Hunspell names that way), for at most
+/// [`MAX_INTERNED`] names; `None` after that.
+fn interned(name: &str) -> Option<&'static str> {
+    // ponytail: leaks each distinct pack dictionary name once, capped; a `Cow` API if more matter.
+    static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let mut names = NAMES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(n) = names.iter().find(|n| **n == name) {
+        return Some(n);
+    }
+    if names.len() >= MAX_INTERNED {
+        return None;
+    }
+    let n: &'static str = Box::leak(name.to_string().into_boxed_str());
+    names.push(n);
+    Some(n)
+}
+
+/// Most pack dictionary names [`interned`] keeps.
+const MAX_INTERNED: usize = 256;
 
 /// Is `word` spelled correctly in the run's proofing language? A language without a dictionary
 /// can't be checked, so every word counts as correct (no red underlines for it).
@@ -806,6 +835,38 @@ pub(crate) fn is_address(token: &str) -> bool {
     token.contains("://") || token.contains('@') || token.starts_with("www.")
 }
 
+/// The spelling mark's message in `lang`: a built-in language's own, a pack language's when we
+/// have it (German, Bulgarian and other common ones), else English.
+fn spelling_message(lang: ProofLang) -> &'static str {
+    if let Some(l) = language(lang) {
+        return l.message;
+    }
+    let pack = lang.pack_locale();
+    let primary = match lang {
+        ProofLang::De => "de",
+        ProofLang::Bg => "bg",
+        _ => pack.as_ref().map_or("", PackLocale::primary),
+    };
+    match primary {
+        "de" => "Möglicher Rechtschreibfehler",
+        "bg" => "Възможна правописна грешка",
+        "nl" => "Mogelijke spelfout",
+        "fr" => "Faute d’orthographe possible",
+        "sv" => "Möjligt stavfel",
+        "da" => "Mulig stavefejl",
+        "nb" | "nn" | "no" => "Mulig stavefeil",
+        "fi" => "Mahdollinen kirjoitusvirhe",
+        "uk" => "Можлива орфографічна помилка",
+        "el" => "Πιθανό ορθογραφικό λάθος",
+        "ca" => "Possible error ortogràfic",
+        "ro" => "Posibilă greșeală de ortografie",
+        "hu" => "Lehetséges helyesírási hiba",
+        "sk" => "Možná pravopisná chyba",
+        "sl" => "Možna pravopisna napaka",
+        _ => "Possible spelling mistake",
+    }
+}
+
 /// The spelling issue of the word at `a..b` of `text`, if it is misspelled in `lang`. Words in
 /// web and e-mail addresses are skipped (unless `opts` says otherwise); `internet` is the
 /// classification of the word's enclosing token, from [`enclosing_token`].
@@ -815,7 +876,7 @@ fn spelling_issue(text: &str, a: usize, b: usize, lang: ProofLang, opts: &Option
     if (opts.ignore_internet && internet) || (lang.is_english() && vi::is_vietnamese_word(w)) || is_correct_in_with(w, lang, opts) {
         return None;
     }
-    let message = language(lang).map_or("Possible spelling mistake", |l| l.message);
+    let message = spelling_message(lang);
     Some(Issue { start: a, end: b, kind: IssueKind::Spelling, message: message.into(), suggestions: Vec::new(), lang })
 }
 
@@ -1226,6 +1287,32 @@ mod tests {
         assert_ne!(english_source(ProofLang::En), Some(EnglishSource::Hunspell(dir.join("en_US.dic"))));
     }
 
+    /// A document tagging thousands of languages keeps the remembered pack hyphenation lookups
+    /// bounded, and stays quick.
+    #[test]
+    fn many_pack_languages_keep_the_hyphenation_cache_bounded() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let root = std::env::temp_dir().join(format!("wc-proof-many-tags-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        packs::set_packs_dir(Some(root.clone()));
+        let start = std::time::Instant::now();
+        for i in 0..3000 {
+            let lang = ProofLang::from_tag(Some(&format!(
+                "q{}{}-{}",
+                (b'a' + (i / 1000) as u8) as char,
+                (b'a' + (i / 100 % 10) as u8) as char,
+                100 + i % 100
+            )));
+            assert!(lang.pack_locale().is_some(), "{lang:?}");
+            let _ = hyphen::hyphenate_word_in("hyphenation", &hyphen::Limits::default(), lang);
+            assert!(packs::hyphenation_lookups() <= 256);
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "{:?}", start.elapsed());
+        packs::set_packs_dir(None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// CP4.2: with no embedded word list, English looks in the dictionaries folder, then an
     /// installed English Language pack, then the system's Hunspell, then the built-in list.
     #[test]
@@ -1476,6 +1563,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// German, Bulgarian and pack languages mark spelling in their own language where we have
+    /// the words for it, like the built-in ones; English otherwise.
+    #[test]
+    fn spelling_messages_are_in_the_language() {
+        assert_eq!(spelling_message(ProofLang::De), "Möglicher Rechtschreibfehler");
+        assert_eq!(spelling_message(ProofLang::Bg), "Възможна правописна грешка");
+        assert_eq!(spelling_message(ProofLang::from_tag(Some("fr-CA"))), "Faute d’orthographe possible");
+        assert_eq!(spelling_message(ProofLang::Pl), "Możliwy błąd pisowni");
+        assert_eq!(spelling_message(ProofLang::from_tag(Some("xh"))), "Possible spelling mistake");
+        assert_eq!(spelling_message(ProofLang::En), "Possible spelling mistake");
+    }
+
     /// CP4.2: a language with no tools of its own (Dutch) is spell-checked, given suggestions and
     /// hyphenated from its installed Language pack; removed, it is unchecked again; English is
     /// unaffected. No grammar rules for it.
@@ -1511,6 +1610,10 @@ mod tests {
         let issues = check_text(text, &[(0..text.len(), nl)]);
         assert_eq!(issues.len(), 1, "{issues:?}");
         assert_eq!((issues[0].kind, &text[issues[0].start..issues[0].end], issues[0].lang), (IssueKind::Spelling, "fietz", nl));
+        assert_eq!(issues[0].message, "Mogelijke spelfout", "the language's own message");
+        assert_eq!((missing_dictionary(Some("nl-NL")), unreadable_dictionary(Some("nl-NL"))), (None, None));
+        let missing_fr = missing_dictionary(Some("fr-FR"));
+        assert!(missing_fr.is_none_or(|n| n == "fr_FR"), "{missing_fr:?}");
         assert!(suggest_in("fietz", 5, nl).contains(&"fiets".to_string()), "{:?}", suggest_in("fietz", 5, nl));
         assert!(check_grammar_in("de de huis", nl).is_empty(), "no grammar rules");
         assert_eq!(hyphen::hyphenate_word_in("xxnaxx", &hyphen::Limits::default(), nl), "xx-naxx");
@@ -1521,6 +1624,10 @@ mod tests {
         packs::reload();
         assert!(is_correct_in("fietz", nl) && !nl.is_proofed());
         assert!(dictionary_load_error(nl).unwrap_or_default().contains("unsupported encoding"));
+        let (name, file, reason) = unreadable_dictionary(Some("nl-NL")).unwrap();
+        assert_eq!((name, file), ("nl_NL", pack.join("spelling.dic")));
+        assert!(reason.contains("unsupported encoding"), "{reason}");
+        assert_eq!(missing_dictionary(Some("nl-NL")), Some("nl_NL"), "as for the other languages");
         // Removed: unchecked again.
         std::fs::remove_dir_all(&pack).unwrap();
         packs::reload();
@@ -1608,11 +1715,23 @@ mod tests {
         let (ru, el) = (ProofLang::Ru, ProofLang::from_tag(Some("el")));
         let before = [hyphen::hyphenate_word_in("hyphenation", &lim, ru), hyphen::hyphenate_word_in("hyphenation", &lim, el)];
         write_pack(&root, "ru", &[("hyphenation.pat", "1на 1ка\n".as_bytes())]);
-        write_pack(&root, "el", &[("hyphenation.pat", "1να 1κα\n".as_bytes())]);
+        write_pack(&root, "el", &[("hyphenation.pat", "1να 1κα 1κά\n".as_bytes())]);
         packs::set_packs_dir(Some(root.clone()));
         assert_eq!([hyphen::hyphenate_word_in("hyphenation", &lim, ru), hyphen::hyphenate_word_in("hyphenation", &lim, el)], before);
         assert_eq!(hyphen::hyphenate_word_in("канака", &lim, ru), "ка-на-ка", "a Russian word uses the pack");
         assert_eq!(hyphen::hyphenate_word_in("κανακα", &lim, el), "κα-να-κα");
+        // Decomposed text is composed for the patterns, as spelling does, and stays as it was
+        // (patterns no fallback would give: `καν-ακά`).
+        write_pack(&root, "grc", &[("hyphenation.pat", "ν1α ν1ά 2κ ά2\n".as_bytes())]);
+        packs::reload();
+        let grc = ProofLang::from_tag(Some("grc"));
+        assert_eq!(hyphen::hyphenate_word_in("κανακά", &lim, grc), "καν-ακά");
+        assert_eq!(hyphen::hyphenate_word_in("κανακα\u{301}", &lim, grc), "καν-ακα\u{301}");
+        assert!(hyphen::hyphenate_word_in("κανάκανα", &lim, grc).starts_with("καν-ά"), "{}", hyphen::hyphenate_word_in("κανάκανα", &lim, grc));
+        assert_eq!(
+            hyphen::hyphenate_word_in("κανα\u{301}κανα", &lim, grc),
+            hyphen::hyphenate_word_in("κανάκανα", &lim, grc).replace('ά', "α\u{301}")
+        );
         packs::set_packs_dir(None);
         set_dictionaries_folder(Some(shared_test_folder()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1631,8 +1750,11 @@ mod tests {
             std::fs::write(dir.join("LICENCES").join("BIG"), &big).unwrap();
         }
         packs::set_packs_dir(Some(root.clone()));
+        let before = packs::LICENCE_BYTES_READ.load(std::sync::atomic::Ordering::Relaxed);
         let from_packs: usize = packs::licence_texts().iter().filter(|(t, _)| t.contains(": BIG")).map(|(_, x)| x.len()).sum();
         assert!(from_packs > 0 && from_packs <= 16 << 20, "{from_packs}");
+        let read = packs::LICENCE_BYTES_READ.load(std::sync::atomic::Ordering::Relaxed) - before;
+        assert!(read <= 16 << 20, "{read} bytes read: a file over what is left is never read");
         packs::set_packs_dir(None);
         set_dictionaries_folder(Some(shared_test_folder()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1803,6 +1925,8 @@ mod tests {
     /// with the rule; a plain paragraph's does, and later sentences in the item are still checked.
     #[test]
     fn list_item_first_word_needs_no_capital() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let grammar = |t: &str, lang: ProofLang, list: bool| -> Vec<String> {
             check_text_with(t, &[(0..t.len(), lang)], &Options::default(), true, list)
                 .into_iter()
@@ -1838,6 +1962,8 @@ mod tests {
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn spelling() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         for w in [
             "if",
             "we",
@@ -1869,6 +1995,8 @@ mod tests {
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn ically_adverbs_are_known() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         for w in ["specifically", "scientifically", "automatically", "dramatically", "Specifically"] {
             assert!(is_correct(w), "{w}");
         }
@@ -1882,6 +2010,8 @@ mod tests {
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn non_ic_words_do_not_take_ally() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         for (base, wrong) in [("desktop", "desktopally"), ("house", "houseally"), ("final", "finalally"), ("green", "greenally")] {
             assert!(is_correct(base), "{base}");
             assert!(!is_correct(wrong), "{wrong}");
@@ -1892,6 +2022,8 @@ mod tests {
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn common_modern_words() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         for w in [
             "desktop",
             "Desktops",
@@ -1929,6 +2061,8 @@ mod tests {
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn british_spellings_are_known() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         for w in [
             "judgement",
             "defence",
@@ -1976,6 +2110,8 @@ mod tests {
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn english_dialects_flag_each_others_spellings() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (us, gb, ca) = (ProofLang::En, ProofLang::EnGb, ProofLang::EnCa);
         // (word, right in en-US, right in en-CA, right in en-GB)
         let cases = [
@@ -2069,6 +2205,8 @@ mod tests {
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn british_words_reported_in_issue_40_are_right_in_en_gb() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (us, gb, ca) = (ProofLang::En, ProofLang::EnGb, ProofLang::EnCa);
         // (word, right in en-US, right in en-CA, right in en-GB)
         let cases = [
@@ -2115,6 +2253,8 @@ mod tests {
     /// with their inflections.
     #[test]
     fn more_british_spellings_are_right_in_en_gb() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let gb = ProofLang::EnGb;
         assert_eq!(ProofLang::from_tag(Some("en-AU")), gb);
         for w in [
@@ -2292,6 +2432,8 @@ mod tests {
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn user_dictionary_accepts_the_other_dialects_spelling() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         add_word("savour");
         assert!(is_correct_in("savour", ProofLang::En), "a word the user added is never flagged");
         assert!(!is_correct_in("savor", ProofLang::EnGb));
@@ -2322,6 +2464,8 @@ mod tests {
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn address_token_covers_every_word_split_out_of_it() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // #1335: one whitespace-delimited token, however punctuation splits it, has one
         // web/e-mail classification, shared by all its words.
         let t = "zxq@mail.example.com,blorp;qwirpy wugwug";
@@ -2337,6 +2481,8 @@ mod tests {
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn address_after_a_wide_space_is_an_internet_token() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // A web or e-mail address after a no-break space, a narrow no-break space, a figure space
         // or an ideographic space is skipped, as it is after a plain space.
         let t = "see\u{a0}https://xyzq.example/blorp and\u{3000}www.qwirpy.example or\u{a0}zxq@mail.example \
@@ -2350,6 +2496,8 @@ mod tests {
 
     #[test]
     fn spelling_scales_over_one_long_token() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // #1335: thousands of punctuation-separated words inside a single
         // whitespace-free token: one classification for the token, one issue per
         // misspelled word, through every public spelling entry point. Without the Language data
@@ -2416,6 +2564,8 @@ mod tests {
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn user_dictionary_works() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(!is_correct("zxqwordcrafty"));
         add_word("zxqwordcrafty");
         assert!(is_correct("zxqwordcrafty"));
@@ -2449,6 +2599,8 @@ mod tests {
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn hostile_dictionary_files_are_capped() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = std::env::temp_dir().join(format!("wc-dict-{}-{}", std::process::id(), "hostile"));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("custom-dictionary.txt");
@@ -2472,6 +2624,8 @@ mod tests {
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn saving_merges_with_the_file() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = std::env::temp_dir().join(format!("wc-dict-{}-{}", std::process::id(), "merge"));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("custom-dictionary.txt");
@@ -2490,6 +2644,8 @@ mod tests {
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn ignored_words_are_not_dictionary_words() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(!is_correct("zxqignoredword"));
         ignore_word("ZxqIgnoredWord");
         assert!(is_correct("zxqignoredword"));
@@ -2534,6 +2690,8 @@ mod tests {
     /// byte range of what was typed, and it is checked as its composed form in every language.
     #[test]
     fn decomposed_words_stay_whole() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let text = "tambie\u{301}n, cafe\u{301}  \u{301}x";
         let ws: Vec<&str> = words(text).into_iter().map(|(a, b)| &text[a..b]).collect();
         assert_eq!(ws, ["tambie\u{301}n", "cafe\u{301}", "\u{301}x"]);
@@ -2625,6 +2783,8 @@ mod tests {
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn each_language_uses_its_own_tools() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         pl::test_dict::install();
         let pl = "Zażółć gęślą jaźń, chrząszcz brzmi w trzcinie.";
         assert!(check_spelling_in(pl, ProofLang::Pl).is_empty(), "{:?}", check_spelling_in(pl, ProofLang::Pl));
@@ -2646,6 +2806,8 @@ mod tests {
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn italian_uses_its_own_tools() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         it::test_dict::install();
         let it = "La città vecchia ha un bel caffè in piazza.";
         assert!(check_spelling_in(it, ProofLang::It).is_empty(), "{:?}", check_spelling_in(it, ProofLang::It));
@@ -2662,6 +2824,8 @@ mod tests {
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn mixed_language_paragraphs_check_each_run_in_its_language() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         pl::test_dict::install();
         // A Polish paragraph quoting English: English spelling and rules inside the quote only.
         let t = "Napisał „the quick brown fox is is here” i poszedł spać, bo żeka wylała.";

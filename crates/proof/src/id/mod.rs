@@ -170,6 +170,8 @@ mod tests {
 
     #[test]
     fn indonesian_dispatch_messages_options_and_mixed_spans() {
+        // English results depend on the dictionaries other tests install.
+        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         test_dict::install();
         assert!(crate::has_dictionary(Some("id-ID")));
         assert!(crate::is_correct_for("rumah", Some("ind")));

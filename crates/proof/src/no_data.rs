@@ -118,6 +118,8 @@ fn hyphenation_is_off_where_it_needs_data() {
 /// Every public entry point, in every language, on every sample: no panic.
 #[test]
 fn every_public_function_runs_without_data() {
+    // English results depend on the dictionaries other tests install.
+    let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let lim = Limits { min_word: 0, after_first: 0, before_last: 0, capitalized: true };
     let opts = Options { ignore_uppercase: false, ignore_numbers: false, ignore_internet: false };
     for text in SAMPLES {
