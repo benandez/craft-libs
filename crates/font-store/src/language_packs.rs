@@ -26,6 +26,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::http::{Cancel, Client, Timeouts};
+use crate::index::IndexError;
 use crate::store::{Error, FontStore, INDEX_CACHE, Progress, Stage, io, read_limited};
 use crate::verify::{VerifyError, sha256_hex};
 
@@ -132,8 +133,8 @@ impl PackIndex {
     }
 
     fn parse(bytes: &[u8], local: bool) -> Result<Self, Error> {
-        let bad = |why: String| Error::Io { what: "reading the Language pack index".into(), source: std::io::Error::other(why) };
-        let index: PackIndex = serde_json::from_slice(bytes).map_err(|e| bad(e.to_string()))?;
+        let bad = |why: String| Error::Index(IndexError::Invalid(format!("Language pack index: {why}")));
+        let mut index: PackIndex = serde_json::from_slice(bytes).map_err(|e| Error::Index(IndexError::Json(format!("Language pack index: {e}"))))?;
         if index.format != 1 {
             return Err(bad(format!("format {} is not supported", index.format)));
         }
@@ -150,6 +151,9 @@ impl PackIndex {
             if !(p.url.starts_with("https://") || local && local_source(&p.url).is_some()) {
                 return Err(bad(format!("pack {}: {} is not an https URL", p.locale, p.url.chars().take(200).collect::<String>())));
             }
+        }
+        for p in &mut index.packs {
+            p.name = plain_text(&p.name);
         }
         Ok(index)
     }
@@ -172,7 +176,7 @@ pub(crate) enum IndexSource {
 impl IndexSource {
     /// The pin, unless [`LANGUAGE_PACK_INDEX_ENV`] is set.
     fn from_env(pin: &PackIndexPin) -> Self {
-        match std::env::var(LANGUAGE_PACK_INDEX_ENV).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+        match language_pack_index_overridden() {
             Some(v) => {
                 log::warn!(
                     "{LANGUAGE_PACK_INDEX_ENV}={v}: the Language pack index is NOT the pinned one and its sha256 is not checked (testing only)"
@@ -186,6 +190,14 @@ impl IndexSource {
     fn is_override(&self) -> bool {
         matches!(self, Self::Override(_))
     }
+}
+
+/// The developer override of the pack index, when [`LANGUAGE_PACK_INDEX_ENV`] is set: the URL or
+/// path that replaces the pinned index, whose sha256 is then **not** checked. Apps show a warning
+/// in their Language pack interface while it is set. It works in release builds too, for
+/// end-to-end testing against a local index.
+pub fn language_pack_index_overridden() -> Option<String> {
+    std::env::var(LANGUAGE_PACK_INDEX_ENV).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
 /// A source the developer override may read: `Ok(url)` for an `https://` URL or an `http://`
@@ -207,14 +219,14 @@ fn local_source(s: &str) -> Option<Result<&str, PathBuf>> {
     if s.contains("://") {
         return None;
     }
-    let path = s.strip_prefix("file://").unwrap_or(s);
-    Some(Err(PathBuf::from(path)))
+    Some(Err(PathBuf::from(s)))
 }
 
 /// A lowercase BCP 47 tag as packs are named (craft-proof's rule): ASCII lowercase letters and
 /// digits in parts of 1 to 8 joined by `-`, at most 35 characters.
 fn is_locale(s: &str) -> bool {
-    !s.is_empty()
+    !windows_reserved(s)
+        && !s.is_empty()
         && s.len() <= 35
         && s.split('-').all(|p| !p.is_empty() && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
 }
@@ -307,7 +319,7 @@ impl FontStore {
         cancel: &Cancel,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<InstalledLanguagePack, Error> {
-        let local = std::env::var(LANGUAGE_PACK_INDEX_ENV).is_ok_and(|v| !v.trim().is_empty());
+        let local = language_pack_index_overridden().is_some();
         self.install_pack_from(local, index, pack, cancel, progress)
     }
 
@@ -322,7 +334,8 @@ impl FontStore {
         self.require_network()?;
         // The entry is checked again here: callers may build one by hand.
         if !is_locale(&pack.locale) || !is_sha256(&pack.sha256) || pack.size > MAX_PACK_ARCHIVE_BYTES {
-            return Err(Error::BadUrl(pack.locale.chars().take(40).collect()));
+            let locale: String = pack.locale.chars().take(40).collect();
+            return Err(Error::Index(IndexError::Invalid(format!("Language pack {locale:?}: bad locale, sha256 or size"))));
         }
         let what = format!("{}.tar.zst", pack.locale);
         let (size, sha) = (pack.size, pack.sha256.clone());
@@ -349,10 +362,10 @@ impl FontStore {
         self.sweep_staging();
         let stage = Stage::new(self.dir())?;
         let unpacked = stage.dir.join(&pack.locale);
-        unpack(&bytes, &unpacked).map_err(|e| Error::Io { what: format!("unpacking {what}"), source: std::io::Error::other(e) })?;
+        unpack(&bytes, &unpacked, pack).map_err(|e| Error::Io { what: format!("unpacking {what}"), source: std::io::Error::other(e) })?;
         let record = InstalledLanguagePack {
             locale: pack.locale.clone(),
-            name: pack.name.chars().take(200).collect(),
+            name: plain_text(&pack.name),
             release: index.release.chars().take(200).collect(),
             version: pack.version.chars().take(200).collect(),
             licence: pack.licence.chars().take(200).collect(),
@@ -374,7 +387,7 @@ impl FontStore {
             }
             return Err(io(format!("installing the {} pack", pack.locale))(e));
         }
-        let mut installed = self.read_installed();
+        let mut installed = self.read_installed()?;
         installed.packs.retain(|p| p.locale != record.locale);
         installed.packs.push(record.clone());
         installed.packs.sort_by(|a, b| a.locale.cmp(&b.locale));
@@ -392,7 +405,13 @@ impl FontStore {
     /// The installed Language packs whose folder is there, by locale.
     pub fn installed_language_packs(&self) -> Vec<InstalledLanguagePack> {
         let dir = self.language_packs_dir();
-        self.read_installed().packs.into_iter().filter(|p| is_locale(&p.locale) && dir.join(&p.locale).is_dir()).collect()
+        let installed = self.read_installed().unwrap_or_else(|_| self.installed_from_disk());
+        installed
+            .packs
+            .into_iter()
+            .filter(|p| is_locale(&p.locale) && dir.join(&p.locale).is_dir())
+            .map(|p| InstalledLanguagePack { name: plain_text(&p.name), ..p })
+            .collect()
     }
 
     /// Removes the pack for `locale`: its folder disappears at once (one rename) and is deleted
@@ -404,7 +423,7 @@ impl FontStore {
         let stage = Stage::new(self.dir())?;
         let _lock = self.lock()?;
         let dest = self.language_packs_dir().join(locale);
-        let mut installed = self.read_installed();
+        let mut installed = self.read_installed()?;
         let known = installed.packs.iter().any(|p| p.locale == locale);
         if !known && std::fs::symlink_metadata(&dest).is_err() {
             return Err(Error::NotInstalled(locale.to_string()));
@@ -417,8 +436,52 @@ impl FontStore {
         // `stage` deletes the old folder when dropped.
     }
 
-    fn read_installed(&self) -> Installed {
-        read_limited(&self.dir().join(INSTALLED), MAX_PACK_INDEX_BYTES).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    /// The record of installed packs (none yet: empty). One that can't be read is kept aside as
+    /// `language-packs.json.bad` and rebuilt from the pack folders on disk, so no installed pack
+    /// is ever dropped from it.
+    fn read_installed(&self) -> Result<Installed, Error> {
+        let path = self.dir().join(INSTALLED);
+        if std::fs::symlink_metadata(&path).is_err() {
+            return Ok(Installed::default());
+        }
+        if let Some(i) = read_limited(&path, MAX_PACK_INDEX_BYTES).and_then(|b| serde_json::from_slice::<Installed>(&b).ok()) {
+            return Ok(i);
+        }
+        log::warn!("{}: can't be read; rebuilt from the Language pack folders", path.display());
+        let rebuilt = self.installed_from_disk();
+        let _ = std::fs::rename(&path, self.dir().join(format!("{INSTALLED}.bad")));
+        self.write_installed(&rebuilt)?;
+        Ok(rebuilt)
+    }
+
+    /// The installed packs as their folders say: each folder named by a locale, with the name
+    /// and licence from its `pack.toml` (release, version and sha256 unknown).
+    fn installed_from_disk(&self) -> Installed {
+        let mut packs: Vec<InstalledLanguagePack> = std::fs::read_dir(self.language_packs_dir())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|l| is_locale(l))
+            .take(MAX_PACKS)
+            .map(|locale| {
+                let info = read_limited(&self.language_packs_dir().join(&locale).join("pack.toml"), MAX_PACK_TOML_BYTES)
+                    .and_then(|b| String::from_utf8(b).ok())
+                    .and_then(|t| t.parse::<toml::Table>().ok());
+                let field = |k: &str| info.as_ref().and_then(|t| t.get(k)).and_then(toml::Value::as_str).map(plain_text);
+                InstalledLanguagePack {
+                    name: field("name").unwrap_or_else(|| locale.clone()),
+                    licence: field("licence").unwrap_or_default(),
+                    locale,
+                    release: String::new(),
+                    version: String::new(),
+                    sha256: String::new(),
+                    size: 0,
+                }
+            })
+            .collect();
+        packs.sort_by(|a, b| a.locale.cmp(&b.locale));
+        Installed { version: 1, packs }
     }
 
     fn write_installed(&self, installed: &Installed) -> Result<(), Error> {
@@ -428,18 +491,46 @@ impl FontStore {
     }
 }
 
-/// Unpacks a `.tar.zst` pack into `dest` (created): regular files and folders only, at most two
-/// levels deep (`LICENCES/<file>`), every path plain and relative, each file at most
-/// [`MAX_PACK_FILE_BYTES`], all of them [`MAX_PACK_UNPACKED_BYTES`], at most
-/// [`MAX_PACK_ENTRIES`]; `pack.toml` required.
-pub(crate) fn unpack(archive: &[u8], dest: &Path) -> Result<(), String> {
-    let zstd = ruzstd::decoding::StreamingDecoder::new(archive).map_err(|e| format!("not zstd: {e}"))?;
+/// The zstd frames of `archive` one after another, as one stream (`zstd` writes one frame, but
+/// a concatenation of frames is a valid `.zst` too, and must not stop after the first).
+struct Frames<'a> {
+    decoder: Option<ruzstd::decoding::StreamingDecoder<&'a [u8], ruzstd::decoding::FrameDecoder>>,
+}
+
+impl<'a> Frames<'a> {
+    fn new(archive: &'a [u8]) -> Result<Self, String> {
+        Ok(Self { decoder: Some(ruzstd::decoding::StreamingDecoder::new(archive).map_err(|e| format!("not zstd: {e}"))?) })
+    }
+}
+
+impl Read for Frames<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            let Some(d) = self.decoder.as_mut() else { return Ok(0) };
+            let n = d.read(buf)?;
+            if n > 0 || buf.is_empty() {
+                return Ok(n);
+            }
+            let rest: &[u8] = d.get_ref();
+            self.decoder = if rest.is_empty() { None } else { Some(ruzstd::decoding::StreamingDecoder::new(rest).map_err(std::io::Error::other)?) };
+        }
+    }
+}
+
+/// Unpacks the `.tar.zst` of `pack` into `dest` (created). Only the contract's files are allowed:
+/// `pack.toml`, `spelling.aff`, `spelling.dic`, `hyphenation.pat` at the root and
+/// `LICENCES/<name>` ([`licence_name`]); regular files and that folder only, each file at most
+/// [`MAX_PACK_FILE_BYTES`], all of them [`MAX_PACK_UNPACKED_BYTES`], at most [`MAX_PACK_ENTRIES`].
+/// Every zstd frame is read, and nothing but tar padding may follow the archive's end. `pack.toml`
+/// must name `pack`'s locale, and the files the index promises (`spelling`, `hyphenation`) must
+/// be there.
+pub(crate) fn unpack(archive: &[u8], dest: &Path, pack: &PackEntry) -> Result<(), String> {
     // The decompressed stream is capped too: tar padding and headers beyond the files' bytes.
-    let limited = zstd.take(MAX_PACK_UNPACKED_BYTES.saturating_add((MAX_PACK_ENTRIES as u64 + 2) * 1024));
-    let mut tar = tar::Archive::new(limited);
+    let cap = MAX_PACK_UNPACKED_BYTES.saturating_add((MAX_PACK_ENTRIES as u64 + 2) * 1024 + 20 * 512);
+    let mut tar = tar::Archive::new(Frames::new(archive)?.take(cap));
     std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     let (mut total, mut count) = (0u64, 0usize);
-    let mut written: Vec<PathBuf> = Vec::new();
+    let mut written: Vec<String> = Vec::new();
     for entry in tar.entries().map_err(|e| format!("not a tar archive: {e}"))? {
         let mut entry = entry.map_err(|e| format!("damaged archive: {e}"))?;
         count += 1;
@@ -448,21 +539,27 @@ pub(crate) fn unpack(archive: &[u8], dest: &Path) -> Result<(), String> {
         }
         let raw = entry.path().map_err(|e| format!("bad file name: {e}"))?.into_owned();
         let rel = safe_entry_path(&raw).ok_or_else(|| format!("{} is outside the pack", raw.display()))?;
+        let parts: Vec<&str> = rel.iter().filter_map(|c| c.to_str()).collect();
         let kind = entry.header().entry_type();
         if kind.is_dir() {
-            if rel.components().count() > 1 {
-                return Err(format!("{}: folders nest at most one level", rel.display()));
-            }
-            if !rel.as_os_str().is_empty() {
-                std::fs::create_dir_all(dest.join(&rel)).map_err(|e| e.to_string())?;
+            match parts.as_slice() {
+                [] => {}
+                [LICENCES_DIR] => std::fs::create_dir_all(dest.join(LICENCES_DIR)).map_err(|e| e.to_string())?,
+                _ => return Err(format!("{}: not a folder a pack has", rel.display())),
             }
             continue;
         }
         if !kind.is_file() {
             return Err(format!("{}: only files and folders are allowed", rel.display()));
         }
-        if rel.components().count() > 2 || written.contains(&rel) {
-            return Err(format!("{}: too deep, or listed twice", rel.display()));
+        let allowed = match parts.as_slice() {
+            [name] => ROOT_FILES.contains(name),
+            [LICENCES_DIR, name] => licence_name(name),
+            _ => false,
+        };
+        let key = parts.join("/");
+        if !allowed || written.contains(&key) {
+            return Err(format!("{}: not a file a pack has, or listed twice", rel.display()));
         }
         let size = entry.header().size().map_err(|e| e.to_string())?;
         if size > MAX_PACK_FILE_BYTES {
@@ -481,12 +578,82 @@ pub(crate) fn unpack(archive: &[u8], dest: &Path) -> Result<(), String> {
         if copied != size {
             return Err(format!("{}: truncated", rel.display()));
         }
-        written.push(rel);
+        written.push(key);
     }
-    if !written.iter().any(|p| p.as_os_str() == "pack.toml") {
+    // Only zeros (the tar end blocks and padding) may follow: not a second archive, not a frame
+    // that wasn't read.
+    let mut rest = tar.into_inner();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = rest.read(&mut buf).map_err(|e| format!("damaged archive: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        if buf.get(..n).is_some_and(|b| b.iter().any(|&x| x != 0)) {
+            return Err("data after the end of the archive".into());
+        }
+    }
+    let has = |f: &str| written.iter().any(|w| w == f);
+    if !has("pack.toml") {
         return Err("no pack.toml".into());
     }
+    let toml = std::fs::read_to_string(dest.join("pack.toml")).map_err(|e| format!("pack.toml: {e}"))?;
+    let named = toml.parse::<toml::Table>().ok().and_then(|t| t.get("locale").and_then(toml::Value::as_str).map(str::to_string));
+    if named.as_deref() != Some(pack.locale.as_str()) {
+        return Err(format!("pack.toml names locale {named:?}, not {:?}", pack.locale));
+    }
+    if pack.spelling && !(has("spelling.aff") && has("spelling.dic")) {
+        return Err("the index promises a spelling dictionary the archive doesn't have".into());
+    }
+    if pack.hyphenation && !has("hyphenation.pat") {
+        return Err("the index promises hyphenation patterns the archive doesn't have".into());
+    }
     Ok(())
+}
+
+/// The files a pack holds at its root.
+const ROOT_FILES: [&str; 4] = ["pack.toml", "spelling.aff", "spelling.dic", "hyphenation.pat"];
+/// The folder of a pack's licence texts.
+const LICENCES_DIR: &str = "LICENCES";
+/// Largest `pack.toml` read back.
+const MAX_PACK_TOML_BYTES: u64 = 1 << 20;
+
+/// A licence file's name: `[A-Za-z0-9._-]`, at most 100 characters, not starting with a dot or
+/// ending with one, and not a name Windows reserves.
+fn licence_name(n: &str) -> bool {
+    !n.is_empty()
+        && n.len() <= 100
+        && !n.starts_with('.')
+        && !n.ends_with('.')
+        && n.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        && !windows_reserved(n)
+}
+
+/// A name Windows reserves for a device (`CON`, `nul.txt`, `COM1`, `lpt9.md`), with or without an
+/// extension, in any case.
+fn windows_reserved(n: &str) -> bool {
+    let stem = n.split('.').next().unwrap_or_default().trim_end_matches(' ').to_ascii_lowercase();
+    matches!(stem.as_str(), "con" | "prn" | "aux" | "nul")
+        || (stem.len() == 4
+            && (stem.starts_with("com") || stem.starts_with("lpt"))
+            && stem.as_bytes().get(3).is_some_and(|d| (b'1'..=b'9').contains(d)))
+}
+
+/// Text from an index or `pack.toml` shown to people (a pack's name): without control,
+/// bidirectional or other format characters (U+202E would reverse what follows), trimmed, at most
+/// 200 characters.
+fn plain_text(s: &str) -> String {
+    s.chars().filter(|&c| !c.is_control() && !is_format(c)).take(200).collect::<String>().trim().to_string()
+}
+
+/// Unicode format characters (general category Cf): bidirectional controls, zero-width ones, the
+/// soft hyphen, tags.
+fn is_format(c: char) -> bool {
+    matches!(c,
+        '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}' | '\u{890}'..='\u{891}' | '\u{8e2}' | '\u{180e}'
+        | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' | '\u{feff}'
+        | '\u{fff9}'..='\u{fffb}' | '\u{110bd}' | '\u{110cd}' | '\u{13430}'..='\u{1343f}' | '\u{1bca0}'..='\u{1bca3}'
+        | '\u{1d173}'..='\u{1d17a}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}')
 }
 
 /// `p` as a plain relative path (`./` prefixes dropped), or `None` for a root, a drive, `..` or a

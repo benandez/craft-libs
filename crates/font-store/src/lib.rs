@@ -48,7 +48,7 @@ pub use http::{Cancel, Client, FetchError, Timeouts, USER_AGENT};
 #[cfg(not(target_arch = "wasm32"))]
 pub use language_packs::{
     InstalledLanguagePack, LANGUAGE_PACK_INDEX_ENV, LANGUAGE_PACKS, MAX_PACK_ARCHIVE_BYTES, MAX_PACK_ENTRIES, MAX_PACK_FILE_BYTES,
-    MAX_PACK_INDEX_BYTES, MAX_PACK_UNPACKED_BYTES, PackEntry, PackIndex, PackIndexPin,
+    MAX_PACK_INDEX_BYTES, MAX_PACK_UNPACKED_BYTES, PackEntry, PackIndex, PackIndexPin, language_pack_index_overridden,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use store::{Caller, Error, FontStore, InstalledFamily, InstalledFile, Network, Problem, Progress, UserSource};

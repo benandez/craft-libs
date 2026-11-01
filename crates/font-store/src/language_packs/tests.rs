@@ -116,6 +116,11 @@ fn entry(locale: &str, url: &str, archive: &[u8]) -> serde_json::Value {
         "size": archive.len(), "licence": "MIT", "class": "Embeddable", "spelling": true, "hyphenation": true})
 }
 
+/// The index entry for `archive` as `locale`.
+fn pack_entry(locale: &str, archive: &[u8]) -> PackEntry {
+    serde_json::from_value(entry(locale, &format!("{RELEASE}{locale}.tar.zst"), archive)).unwrap()
+}
+
 fn index_json(packs: &[serde_json::Value]) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({"format": 1, "release": "language-packs-1", "packs": packs})).unwrap()
 }
@@ -226,6 +231,7 @@ fn indexes_are_checked() {
         ("http://evil.org@127.0.0.1/i.json", true),
         ("http://127.0.0.1@evil.org/i.json", false),
         ("ftp://127.0.0.1/i.json", false),
+        ("file:///tmp/i.json", false),
     ] {
         assert_eq!(local_source(s).is_some(), ok, "{s}");
     }
@@ -269,6 +275,7 @@ fn developer_override_reads_a_local_index_without_the_pin() {
 #[test]
 fn hostile_archives_are_refused() {
     let toml: &[u8] = b"locale = \"nl\"\nlicence = \"MIT\"\n";
+    let nl = PackEntry { spelling: false, hyphenation: false, ..pack_entry("nl", b"") };
     let big = vec![0u8; 10];
     let cases: Vec<(&str, Vec<u8>)> = vec![
         ("traversal", zst(&tar_of(&[("pack.toml", FILE, toml), ("../evil", FILE, b"x")]))),
@@ -283,19 +290,36 @@ fn hostile_archives_are_refused() {
         ("not zstd", tar_of(&[("pack.toml", FILE, toml)])),
         ("not tar", zst(b"hello, this is not a tar archive at all")),
         ("empty", Vec::new()),
+        // Only the contract's names.
+        ("other root file", zst(&tar_of(&[("pack.toml", FILE, toml), ("readme.txt", FILE, b"x")]))),
+        ("other folder", zst(&tar_of(&[("pack.toml", FILE, toml), ("extra/", tar::EntryType::Directory, b"")]))),
+        ("nested licence", zst(&tar_of(&[("pack.toml", FILE, toml), ("LICENCES/sub/x", FILE, b"x")]))),
+        ("hidden licence", zst(&tar_of(&[("pack.toml", FILE, toml), ("LICENCES/.x", FILE, b"x")]))),
+        ("space in licence", zst(&tar_of(&[("pack.toml", FILE, toml), ("LICENCES/a b", FILE, b"x")]))),
+        ("trailing dot", zst(&tar_of(&[("pack.toml", FILE, toml), ("LICENCES/COPYING.", FILE, b"x")]))),
+        ("reserved CON", zst(&tar_of(&[("pack.toml", FILE, toml), ("LICENCES/CON", FILE, b"x")]))),
+        ("reserved nul.txt", zst(&tar_of(&[("pack.toml", FILE, toml), ("LICENCES/nul.txt", FILE, b"x")]))),
+        ("reserved com1", zst(&tar_of(&[("pack.toml", FILE, toml), ("LICENCES/com1.md", FILE, b"x")]))),
+        // pack.toml must name the entry's locale.
+        ("other locale", zst(&tar_of(&[("pack.toml", FILE, b"locale = \"de\"\n")]))),
+        ("no locale", zst(&tar_of(&[("pack.toml", FILE, b"licence = \"MIT\"\n")]))),
+        ("bad toml", zst(&tar_of(&[("pack.toml", FILE, b"locale = \n")]))),
+        // Nothing may follow the archive: not another frame, not raw bytes.
+        ("second archive", [zst(&tar_of(&[("pack.toml", FILE, toml)])), zst(&tar_of(&[("spelling.dic", FILE, b"1\nx\n")]))].concat()),
+        ("trailing bytes", [zst(&tar_of(&[("pack.toml", FILE, toml)])), b"garbage".to_vec()].concat()),
         ("truncated", zst(&tar_of(&[("pack.toml", FILE, toml), ("spelling.dic", FILE, &big)]))[..20].to_vec()),
     ];
     for (what, archive) in cases {
         let root = temp("hostile");
         let dest = root.join("nl");
-        assert!(unpack(&archive, &dest).is_err(), "{what}");
+        assert!(unpack(&archive, &dest, &nl).is_err(), "{what}");
         assert!(!root.join("evil").exists() && !root.parent().unwrap().join("evil").exists(), "{what}");
     }
     // Too many entries.
-    let names: Vec<String> = (0..=MAX_PACK_ENTRIES).map(|i| format!("f{i}")).collect();
+    let names: Vec<String> = (0..=MAX_PACK_ENTRIES).map(|i| format!("LICENCES/f{i}")).collect();
     let mut files: Vec<(&str, tar::EntryType, &[u8])> = vec![("pack.toml", FILE, toml)];
     files.extend(names.iter().map(|n| (n.as_str(), FILE, &b""[..])));
-    assert!(unpack(&zst(&tar_of(&files)), &temp("many").join("nl")).is_err());
+    assert!(unpack(&zst(&tar_of(&files)), &temp("many").join("nl"), &nl).is_err());
     // A header claiming a file larger than the cap is refused before anything is read.
     let mut t = tar::Header::new_gnu();
     t.set_path("pack.toml").unwrap();
@@ -311,12 +335,82 @@ fn hostile_archives_are_refused() {
     h.set_cksum();
     tarball.extend_from_slice(h.as_bytes());
     tarball.extend_from_slice(&[0u8; 1024]);
-    let err = unpack(&zst(&tarball), &temp("huge").join("nl")).unwrap_err();
+    let err = unpack(&zst(&tarball), &temp("huge").join("nl"), &nl).unwrap_err();
     assert!(err.contains("larger than"), "{err}");
     // A good one unpacks.
     let dest = temp("good").join("nl");
-    unpack(&pack_archive("nl", "x"), &dest).unwrap();
+    let good = pack_archive("nl", "x");
+    unpack(&good, &dest, &pack_entry("nl", &good)).unwrap();
     assert!(dest.join("LICENCES/COPYING").is_file());
+    // A tar split over several zstd frames is read to the end.
+    let tarball = tar_of(&[("pack.toml", FILE, toml), ("LICENCES/", tar::EntryType::Directory, b""), ("LICENCES/COPYING", FILE, b"t")]);
+    let (a, b) = tarball.split_at(700);
+    let dest = temp("frames").join("nl");
+    unpack(&[zst(a), zst(b)].concat(), &dest, &nl).unwrap();
+    assert!(dest.join("LICENCES/COPYING").is_file());
+    // The index's promises are checked against the files.
+    let bare = zst(&tar_of(&[("pack.toml", FILE, toml)]));
+    for e in [PackEntry { spelling: true, ..nl.clone() }, PackEntry { hyphenation: true, ..nl.clone() }] {
+        let err = unpack(&bare, &temp("promise").join("nl"), &e).unwrap_err();
+        assert!(err.contains("promises"), "{err}");
+    }
+}
+
+#[test]
+fn names_are_plain_text_and_reserved_locales_refused() {
+    let a = pack_archive("nl", "x");
+    let mut e = entry("nl", &format!("{RELEASE}nl.tar.zst"), &a);
+    e["name"] = serde_json::json!(" Neder\u{202e}lands\u{7}\u{200b}\n");
+    assert_eq!(PackIndex::from_json(&index_json(&[e])).unwrap().packs[0].name, "Nederlands");
+    for l in ["con", "nul", "aux", "prn", "com1", "lpt9"] {
+        assert!(!is_locale(l), "{l}");
+        assert!(PackIndex::from_json(&index_json(&[entry(l, &format!("{RELEASE}{l}.tar.zst"), &a)])).is_err(), "{l}");
+    }
+    assert!(is_locale("com") && is_locale("lpt") && is_locale("com10"));
+}
+
+#[test]
+fn a_corrupt_record_is_rebuilt_from_the_folders() {
+    let (store, server, pin, _) = setup("corrupt");
+    let index = store.fetch_pack_index_from(&IndexSource::Pinned(pin), &Cancel::new()).unwrap();
+    let nl = index.pack("nl").unwrap().clone();
+    store.install_pack_from(false, &index, &nl, &Cancel::new(), &mut |_| {}).unwrap();
+    let record = store.dir().join("language-packs.json");
+    std::fs::write(&record, b"{ not json").unwrap();
+    // Still listed, with the name from its pack.toml.
+    let listed = store.installed_language_packs();
+    assert_eq!(listed.iter().map(|p| (p.locale.as_str(), p.name.as_str())).collect::<Vec<_>>(), [("nl", "Test")]);
+    // Installing another keeps it.
+    std::fs::write(&record, b"{ not json").unwrap();
+    let de = pack_archive("de", "zzde");
+    server.serve("release/de.tar.zst", &de);
+    let de_entry = PackEntry { url: format!("{RELEASE}de.tar.zst"), ..pack_entry("de", &de) };
+    store.install_pack_from(false, &index, &de_entry, &Cancel::new(), &mut |_| {}).unwrap();
+    let mut locales: Vec<String> = store.installed_language_packs().into_iter().map(|p| p.locale).collect();
+    locales.sort();
+    assert_eq!(locales, ["de", "nl"]);
+    assert!(store.dir().join("language-packs.json.bad").is_file(), "the unreadable record is kept aside");
+    // Removing works on a rebuilt record too.
+    std::fs::write(&record, b"\xff").unwrap();
+    store.remove_language_pack("nl").unwrap();
+    assert_eq!(store.installed_language_packs().into_iter().map(|p| p.locale).collect::<Vec<_>>(), ["de"]);
+}
+
+#[test]
+fn bad_hand_made_entries_are_index_errors() {
+    let (store, _server, pin, _) = setup("variant");
+    let index = store.fetch_pack_index_from(&IndexSource::Pinned(pin), &Cancel::new()).unwrap();
+    let nl = index.pack("nl").unwrap().clone();
+    for e in [PackEntry { locale: "../nl".into(), ..nl.clone() }, PackEntry { sha256: "x".into(), ..nl.clone() }] {
+        let got = store.install_pack_from(false, &index, &e, &Cancel::new(), &mut |_| {});
+        assert!(matches!(got, Err(Error::Index(IndexError::Invalid(_)))), "{got:?}");
+    }
+}
+
+#[test]
+fn the_override_is_visible() {
+    let set = std::env::var(LANGUAGE_PACK_INDEX_ENV).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    assert_eq!(language_pack_index_overridden(), set);
 }
 
 /// A staging folder an earlier process with the same id left behind is cleared, so an unpack
