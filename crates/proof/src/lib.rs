@@ -51,8 +51,8 @@
 //! **Language data** (the Moby word list, the pattern files, our word supplements) is embedded at
 //! build time from craft-i18n's `language-data/` (`CRAFT_I18N_DIR`, see `build.rs`). English
 //! spelling never goes unchecked: without the embedded word list it uses an English Hunspell
-//! dictionary installed on the system, and without one the core word list built into the crate
-//! (see [`english_source`]). Hyphenation that needs the data is off without it; grammar and the
+//! dictionary installed on the system, and without one the whole Moby word list built into the
+//! crate (see [`english_source`]). Hyphenation that needs the data is off without it; grammar and the
 //! rule-based hyphenation (Bulgarian, Turkish, Russian) are code and still work.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -326,8 +326,9 @@ pub fn dictionary_load_error(lang: ProofLang) -> Option<String> {
 
 /// Where the spelling of an English `lang` comes from now (`None` for other languages): the word
 /// list embedded at build time, else an English Hunspell dictionary from the dictionaries folder
-/// or the system (the run's English first), else the core word list built into the crate, which
-/// marks only near misses of common words. Reads the Hunspell dictionary once when there is no
+/// or the system (the run's English first), else the Moby word list built into the crate.
+/// British and Canadian English use an `en_US` Hunspell dictionary when no regional one is
+/// installed. Reads the Hunspell dictionary once when there is no
 /// embedded word list (it is cached afterwards).
 pub fn english_source(lang: ProofLang) -> Option<EnglishSource> {
     lang.is_english().then(|| english::source(lang))
@@ -464,9 +465,11 @@ const COMMON: &str = "a an the and or but if of to in on at by for with from as 
 /// lowercase base form per line, `#` comments. Inflections come from [`known_core`].
 use data::EXTRA_EN;
 
+/// The supplement's words: the Language data's copy, else the crate's own ([`english::EXTRA`]).
 fn extra_words() -> &'static HashSet<&'static str> {
     static E: OnceLock<HashSet<&str>> = OnceLock::new();
-    E.get_or_init(|| EXTRA_EN.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect())
+    let extra = if EXTRA_EN.is_empty() { english::EXTRA } else { EXTRA_EN };
+    E.get_or_init(|| extra.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect())
 }
 
 /// A base form in the dictionary or the supplement.
@@ -479,9 +482,9 @@ fn known_core(w: &str) -> bool {
     known_with(w, &|s| base_known(d, s))
 }
 
-/// [`known_core`] against the core word list built into the crate (no embedded word list).
-pub(crate) fn known_in_core_list(w: &str) -> bool {
-    known_with(w, &|s| english::core_contains(s) || extra_words().contains(s))
+/// [`known_core`] against the word list built into the crate (no embedded word list).
+pub(crate) fn known_in_word_list(w: &str) -> bool {
+    known_with(w, &|s| english::word_list_contains(s) || extra_words().contains(s))
 }
 
 /// Is `w` (lower case) a word, by `base_known` (a base form in the word list), the common words,
@@ -608,7 +611,7 @@ pub(crate) fn accepted_by_options(word: &str, opts: &Options) -> bool {
 }
 
 /// Is the English word list embedded? Without it English is checked against an installed
-/// Hunspell dictionary or the core word list ([`english`]).
+/// Hunspell dictionary or the word list built into the crate ([`english`]).
 pub(crate) fn english_data() -> bool {
     !dict::Dictionary::en_us().is_empty()
 }
@@ -1196,7 +1199,7 @@ mod tests {
     }
 
     /// Remove the English files of `dir` and set it again: English goes back to what it was
-    /// (the core list, or a dictionary installed on the system), for the tests that follow.
+    /// (the built-in list, or a dictionary installed on the system), for the tests that follow.
     fn drop_english_files(dir: &std::path::Path, english: &[(&str, &[u8], &[u8])]) {
         for (name, _, _) in english {
             let _ = std::fs::remove_file(dir.join(format!("{name}.aff")));
@@ -1206,18 +1209,18 @@ mod tests {
     }
 
     /// R6.4, English never goes unchecked: with no embedded word list, an English Hunspell
-    /// dictionary (here in the dictionaries folder) is used before the core word list built into
-    /// the crate; with one, the embedded list stays in use whatever is installed.
+    /// dictionary (here in the dictionaries folder) is used before the word list built into the
+    /// crate; with one, the embedded list stays in use whatever is installed.
     #[test]
-    fn english_hunspell_dictionary_is_used_before_the_core_list() {
+    fn english_hunspell_dictionary_is_used_before_the_built_in_list() {
         let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = std::env::temp_dir().join(format!("wc-proof-en-hunspell-{}", std::process::id()));
-        // A tiny en_US. `teh` is a word in it, so a right `teh` is this dictionary answering (the
-        // core list marks it); `hous` and `because` aren't.
+        // A tiny en_US. `hous` and `because` aren't words in it, so a marked `because` is this
+        // dictionary answering (the built-in list knows it).
         let english: &[(&str, &[u8], &[u8])] =
             &[("en_US", b"SET UTF-8\nTRY esiarntolcdugmphbyfvkwz\nSFX S Y 1\nSFX S 0 s .\n", b"3\nteh\nthe\nhouse/S\n")];
         folder_with_english(&dir, english);
-        if cfg!(craft_proof_data) {
+        if english_data() {
             assert_eq!(english_source(ProofLang::En), Some(EnglishSource::Embedded));
             // (The Moby list has `teh`.)
             assert!(!is_correct_in("becuase", ProofLang::En) && is_correct_in("because", ProofLang::En));
@@ -1229,12 +1232,12 @@ mod tests {
                 assert!(is_correct_in(w, ProofLang::En), "{w}");
             }
             for w in ["hous", "because", "housez"] {
-                assert!(!is_correct_in(w, ProofLang::En), "{w}: the dictionary's words, not the core list's");
+                assert!(!is_correct_in(w, ProofLang::En), "{w}: the dictionary's words, not the built-in list's");
             }
             assert!(!is_correct("hous") && is_correct("teh"), "the older English-only functions too");
             assert_eq!(check_spelling_in("teh hous", ProofLang::En).len(), 1);
             assert!(suggest_in("hous", 3, ProofLang::En).contains(&"house".to_string()), "{:?}", suggest_in("hous", 3, ProofLang::En));
-            // No en_GB or en_CA file: the en_US one beats the core list.
+            // No en_GB or en_CA file: they use the en_US one (one copy, shared).
             assert_eq!(english_source(ProofLang::EnGb), Some(EnglishSource::Hunspell(dic.clone())));
             assert_eq!(english_source(ProofLang::EnCa), Some(EnglishSource::Hunspell(dic)));
         }
@@ -1243,14 +1246,15 @@ mod tests {
         assert!(check_text("hous teh", &[(0..8, ProofLang::De)]).is_empty());
         assert_eq!(english_source(ProofLang::Pl), None);
         drop_english_files(&dir, english);
-        if !cfg!(craft_proof_data) {
+        if !english_data() {
             assert_ne!(english_source(ProofLang::En), Some(EnglishSource::Hunspell(dir.join("en_US.dic"))));
         }
     }
 
     /// R6.4: an English Hunspell dictionary that is there but can't be read (an encoding we don't
     /// read, bytes that aren't UTF-8, no words) is an error reported for its English, never a
-    /// panic, and that English falls back to the core list, which still marks `becuase`.
+    /// panic, and that English falls back to the next dictionary or the built-in word list, which
+    /// still marks `becuase`.
     #[test]
     fn unreadable_english_dictionary_is_reported_and_skipped() {
         let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1259,11 +1263,13 @@ mod tests {
             &[("en_US", b"SET UTF-8\n", b"0\n"), ("en_GB", b"SET SHIFT_JIS\n", b"1\ncolour\n"), ("en_CA", b"SET UTF-8\n", b"1\n\xff\xfe\n")];
         folder_with_english(&dir, english);
         for (lang, reason) in [(ProofLang::En, "no words"), (ProofLang::EnGb, "unsupported encoding"), (ProofLang::EnCa, "not UTF-8")] {
-            if cfg!(craft_proof_data) {
+            if english_data() {
                 assert_eq!(english_source(lang), Some(EnglishSource::Embedded));
                 assert_eq!(dictionary_load_error(lang), None, "{lang:?}: never read");
             } else {
-                assert_eq!(english_source(lang), Some(EnglishSource::CoreList), "{lang:?}");
+                // The built-in list, or a dictionary installed on the system (tried next).
+                let source = english_source(lang);
+                assert!(!matches!(&source, Some(EnglishSource::Hunspell(p)) if p.starts_with(&dir)), "{lang:?}: {source:?}");
                 let error = dictionary_load_error(lang).unwrap_or_default();
                 assert!(error.contains(reason), "{lang:?}: {error}");
             }
@@ -1272,6 +1278,36 @@ mod tests {
         }
         drop_english_files(&dir, english);
         assert_eq!(dictionary_load_error(ProofLang::EnGb), None, "a new folder forgets the old errors");
+    }
+
+    /// craft-libs#482 review: an English dictionary that can't be read is skipped for the next
+    /// name or folder, not for the built-in list; and a dictionary with compounding and output
+    /// conversion (as the usual en_US and en_GB ones have) is read, not refused.
+    #[test]
+    fn english_tries_the_next_dictionary_and_reads_real_world_directives() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = std::env::temp_dir().join(format!("wc-proof-en-next-{}", std::process::id()));
+        let english: &[(&str, &[u8], &[u8])] = &[
+            ("en_GB", b"SET SHIFT_JIS\n", b"1\ncolour\n"),
+            (
+                "en_US",
+                b"SET UTF-8\nICONV 1\nICONV \xe2\x80\x99 '\nOCONV 1\nOCONV ' \xe2\x80\x99\nCOMPOUNDMIN 1\nONLYINCOMPOUND c\n\
+                  COMPOUNDRULE 1\nCOMPOUNDRULE n*1t\nSFX S Y 1\nSFX S 0 s .\n",
+                b"4\nhouse/S\nthe\nqwzzy\n1st/c\n",
+            ),
+        ];
+        folder_with_english(&dir, english);
+        if !english_data() {
+            let us = dir.join("en_US.dic");
+            for lang in [ProofLang::En, ProofLang::EnGb, ProofLang::EnCa] {
+                assert_eq!(english_source(lang), Some(EnglishSource::Hunspell(us.clone())), "{lang:?}");
+                assert!(is_correct_in("qwzzy", lang) && is_correct_in("houses", lang) && !is_correct_in("because", lang), "{lang:?}");
+            }
+            let error = dictionary_load_error(ProofLang::EnGb).unwrap_or_default();
+            assert!(error.contains("unsupported encoding"), "the en_GB file it would rather use is reported: {error}");
+            assert_eq!(dictionary_load_error(ProofLang::En), None);
+        }
+        drop_english_files(&dir, english);
     }
 
     /// #1063: the dictionaries folder is searched before the system locations; the dictionaries
@@ -1718,8 +1754,8 @@ mod tests {
         assert!(words.iter().all(|w| w.chars().all(|c| c.is_lowercase() || c == '\'' || c == '-')), "not lowercase");
     }
 
-    /// Without the Language data too: the installed English dictionary or the core list marks
-    /// both near misses (R6.4).
+    /// Without the Language data too: the installed English dictionary or the built-in word list
+    /// marks both misspellings (R6.4).
     #[test]
     fn spelling_issues_in_text() {
         let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1758,12 +1794,13 @@ mod tests {
         assert!(["xyzq", "blorp", "qwirpy", "zxq", "frobq", "zibb", "snorf", "wugwug"].iter().all(|w| bad.contains(w)), "{bad:?}");
     }
 
-    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn spelling_scales_over_one_long_token() {
         // #1335: thousands of punctuation-separated words inside a single
         // whitespace-free token: one classification for the token, one issue per
-        // misspelled word, through every public spelling entry point.
+        // misspelled word, through every public spelling entry point. Without the Language data
+        // too (craft-libs#482 review: the old core list took 14 s here).
+        let started = std::time::Instant::now();
         let word = |i: usize| {
             let mut w = String::from("zxq");
             let mut n = i;
@@ -1782,6 +1819,8 @@ mod tests {
         let opts = Options { ignore_internet: false, ..Options::default() };
         assert_eq!(check_spelling_with(&t, &opts).len(), 2000);
         assert_eq!(check_text(&t, &[]).into_iter().filter(|i| i.kind == IssueKind::Spelling).count(), 2000);
+        // Debug builds on a loaded CI machine: a bound against blowups, not a benchmark.
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
     }
 
     #[test]

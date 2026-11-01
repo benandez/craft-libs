@@ -19,7 +19,9 @@
 //! read as `fi`) and ignored characters (`IGNORE`), and the suggestion tables `TRY`, `KEY`, `MAP`
 //! and `REP`.
 //! Morphological data (`AM` aliases, the fields after a stem) is skipped. Rejected: compounding,
-//! long or numeric flags, `NEEDAFFIX` and the other directives that change which words are correct.
+//! long or numeric flags, `NEEDAFFIX` and the other directives that change which words are correct
+//! (an English dictionary's compounding and `OCONV` are ignored instead:
+//! [`AffixDict::from_hunspell_english`]).
 //!
 //! Lookups never panic: stems sit in one string, found through an open-addressing hash table, and
 //! a probe allocates only small scratch strings for the candidate roots it tries.
@@ -339,6 +341,8 @@ struct Rules {
     substandard: Option<char>,
     /// The `KEEPCASE` flag.
     keepcase: Option<char>,
+    /// The `ONLYINCOMPOUND` flag, read for English only ([`AffixDict::from_hunspell_english`]).
+    only_in_compound: Option<char>,
     iconv: Vec<(String, String)>,
     ignore: Vec<char>,
     /// `AF` flag aliases: alias `n` (1-based) stands for `aliases[n - 1]`.
@@ -422,8 +426,27 @@ fn zero_empty(s: &str) -> String {
 /// but it is not a flag of its own: it is dropped wherever flags are read.
 const EMOJI_SELECTOR: char = '\u{fe0f}';
 
-/// Read Hunspell `.aff` text (already decoded to UTF-8).
-fn parse_aff(aff: &str) -> Result<Rules, String> {
+/// Directives an English dictionary may carry that don't change which English words are correct
+/// here, ignored by [`AffixDict::from_hunspell_english`]: compounding (English dictionaries use
+/// it only for ordinals such as `1st`, which have digits and are skipped by the spelling check)
+/// and output conversion (`OCONV`: how suggestions are written, such as `'` as `’`).
+const IGNORED_IN_ENGLISH: &[&str] = &[
+    "COMPOUNDBEGIN",
+    "COMPOUNDEND",
+    "COMPOUNDFIRST",
+    "COMPOUNDFLAG",
+    "COMPOUNDLAST",
+    "COMPOUNDMIDDLE",
+    "COMPOUNDMIN",
+    "COMPOUNDPERMITFLAG",
+    "COMPOUNDRULE",
+    "OCONV",
+];
+
+/// Read Hunspell `.aff` text (already decoded to UTF-8). `english`: ignore the directives in
+/// [`IGNORED_IN_ENGLISH`], and keep the `ONLYINCOMPOUND` flag so the stems that are only parts of
+/// compounds can be left out.
+fn parse_aff(aff: &str, english: bool) -> Result<Rules, String> {
     let mut r = Rules::default();
     let mut cross: HashMap<(bool, char), bool> = HashMap::new();
     let mut map_header = false;
@@ -518,6 +541,8 @@ fn parse_aff(aff: &str) -> Result<Rules, String> {
                     r.prefixes.push(rule);
                 }
             }
+            "ONLYINCOMPOUND" if english => r.only_in_compound = Some(one_flag(at(1), dir, n)?),
+            d if english && IGNORED_IN_ENGLISH.contains(&d) => {}
             d if UNSUPPORTED.contains(&d) => return Err(format!("line {}: {d} is not supported", n + 1)),
             _ => {}
         }
@@ -542,11 +567,23 @@ impl AffixDict {
     /// Build from Hunspell `.aff` and `.dic` text (decoded to UTF-8; the `.dic` count line and
     /// morphological fields are ignored). `comments` (provenance, licence) are kept with the data.
     pub fn from_hunspell(aff: &str, dic: &str, comments: &[&str]) -> Result<AffixDict, String> {
+        AffixDict::from_hunspell_in(aff, dic, comments, false)
+    }
+
+    /// [`AffixDict::from_hunspell`] for an English dictionary: compounding and output conversion
+    /// (`COMPOUNDMIN`, `COMPOUNDRULE`, `OCONV`…), which other languages need but English spelling
+    /// doesn't, are ignored rather than refused, and the stems marked `ONLYINCOMPOUND` (parts of
+    /// compounds only) are left out.
+    pub fn from_hunspell_english(aff: &str, dic: &str, comments: &[&str]) -> Result<AffixDict, String> {
+        AffixDict::from_hunspell_in(aff, dic, comments, true)
+    }
+
+    fn from_hunspell_in(aff: &str, dic: &str, comments: &[&str], english: bool) -> Result<AffixDict, String> {
         // Some dictionaries open with a UTF-8 BOM; it must not glue itself to the first
         // directive or turn the `.dic` count line into a stem.
         let aff = aff.strip_prefix('\u{feff}').unwrap_or(aff);
         let dic = dic.strip_prefix('\u{feff}').unwrap_or(dic);
-        let rules = parse_aff(aff)?;
+        let rules = parse_aff(aff, english)?;
         let mut stems: Vec<(String, String)> = Vec::new();
         for (n, line) in dic.lines().enumerate() {
             // The entry may hold spaces (`ad hoc/B\tpo:adv`); it ends where Hunspell ends it.
@@ -582,6 +619,9 @@ impl AffixDict {
                 continue;
             }
             let flags = rules.flags(&flags).to_string();
+            if rules.only_in_compound.is_some_and(|f| flags.contains(f)) {
+                continue;
+            }
             stems.push((word, flags));
         }
         AffixDict::build(rules, stems, comments.iter().map(ToString::to_string).collect())
@@ -1753,6 +1793,29 @@ pub(crate) mod tests {
         for dict in [&d, &AffixDict::from_bytes(&d.to_bytes()).unwrap()] {
             assert!(dict.check("kots") && !dict.check("rossz"));
             assert!(dict.check("pH") && !dict.check("PH"));
+        }
+    }
+
+    /// craft-libs#482 review: an English dictionary with compounding (for ordinals) and output
+    /// conversion, as the usual en_US and en_GB ones have, loads for English; its `ONLYINCOMPOUND`
+    /// stems are left out. Other languages still refuse those directives. (A synthetic `.aff`
+    /// written for this test.)
+    #[test]
+    fn english_dictionaries_ignore_compounding_and_output_conversion() {
+        let aff = "SET UTF-8\nTRY esianrtolcdugmphbyfvkwz'\nICONV 1\nICONV ’ '\nOCONV 1\nOCONV ' ’\nNOSUGGEST !\n\
+                   COMPOUNDMIN 1\nONLYINCOMPOUND c\nCOMPOUNDRULE 2\nCOMPOUNDRULE n*1t\nCOMPOUNDRULE n*mp\nCOMPOUNDFLAG Z\n\
+                   WORDCHARS 0123456789\nSFX S Y 1\nSFX S 0 s [^sxzhy]\nSFX D Y 1\nSFX D 0 ed [^ey]\n";
+        let dic = "5\nhouse/S\nwalk/SD\n0th/pc\n1st/c\nthe\n";
+        assert!(AffixDict::from_hunspell(aff, dic, &[]).is_err(), "refused for other languages");
+        let d = AffixDict::from_hunspell_english(aff, dic, &[]).unwrap();
+        for w in ["house", "houses", "walked", "walks", "the"] {
+            assert!(d.check(w), "{w}");
+        }
+        assert!(!d.check("0th") && !d.check("1st"), "parts of compounds only");
+        assert!(!d.check("housed") && !d.check("hous"));
+        // The directives that change which words are right are still refused.
+        for dir in ["NEEDAFFIX", "CIRCUMFIX", "PSEUDOROOT", "FULLSTRIP"] {
+            assert!(AffixDict::from_hunspell_english(&format!("{dir} X\n"), dic, &[]).is_err(), "{dir}");
         }
     }
 

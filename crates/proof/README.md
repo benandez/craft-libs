@@ -13,7 +13,7 @@ craft-proof = { git = "https://github.com/storytold/craft-libs", rev = "<commit>
 
 | Language | Spelling | Grammar | Hyphenation |
 |---|---|---|---|
-| English (en-US, en-GB and the British-spelling Englishes, en-CA) | Moby word list + `en-extra.txt`, dialect variants (`en-variants.txt`); without them the installed Hunspell English, else the built-in core list ([below](#english-is-always-checked)) | yes | Moby list, our patterns, heuristic |
+| English (en-US, en-GB and the British-spelling Englishes, en-CA) | Moby word list + `en-extra.txt`, dialect variants (`en-variants.txt`); without them the installed Hunspell English, else the built-in Moby list ([below](#english-is-always-checked)) | yes | Moby list, our patterns, heuristic |
 | Polish, Portuguese, Italian | the installed Hunspell dictionary | yes | TeX patterns |
 | Croatian, Turkish, Russian, Czech, Indonesian, Spanish (es, es-MX, es-419, es-UY) | the installed Hunspell dictionary (Russian also `ru-extra.txt`) | yes | Turkish and Russian rules; English fallback otherwise |
 | German | — | — | TeX patterns |
@@ -55,8 +55,9 @@ The word lists and patterns live in [craft-i18n](https://github.com/storytold/cr
   grammar and the Hunspell languages work as before.
 - `CRAFT_I18N_REQUIRED=1` (releases) makes a missing directory or file an error.
 
-Tests that pin results of the data are ignored without it; `src/no_data.rs` runs every public
-entry point with no data embedded.
+Tests that pin results of the data run only when every file is embedded (`craft_proof_data`);
+`src/no_data.rs` runs every public entry point when none is (`craft_proof_no_data`). A partial
+data folder runs neither set.
 
 ### English is always checked
 
@@ -64,23 +65,27 @@ English spelling uses the first of these that is there; `english_source(lang)` s
 
 1. **Embedded:** the Moby word list from `CRAFT_I18N_DIR` (above). Nothing below is used then.
 2. **System Hunspell:** an English `.aff`/`.dic` pair in the dictionaries folder or the system
-   locations, the run's English first (`en_US`, `en_GB`, `en_CA`…), then another English. None on
-   the web.
-3. **Core list:** `data/en-core.txt`, about 11,000 common words built into the crate (inflections
-   come from the same rules as the Moby list's). It marks only near misses of common words: two
-   letters swapped (`teh`, `recieved`), or one letter added, missing or changed in a lower-case
-   word of four letters or more (`definately`). Other words it doesn't know (rare words, names,
-   terms) are taken as right.
+   locations, the run's English first (`en_US`, `en_GB`, `en_CA`…), then another English: en-GB
+   and en-CA use an `en_US` dictionary when no regional one is installed. A file that can't be
+   read is skipped for the next name or folder; one file is read once for every English that uses
+   it. Compounding (`COMPOUNDMIN`, `COMPOUNDRULE`…, used by English dictionaries only for
+   ordinals) and `OCONV` are ignored for English rather than refused. None on the web.
+3. **Built-in list:** `data/en-words.dic`, the whole Moby word list (about 165,000 words, 344 KB
+   compressed, words only) built into the crate, with `data/en-extra.txt` (WordCraft's supplement
+   of modern words, a copy of craft-i18n's) and the same inflection rules as the embedded list. A
+   word it doesn't know is misspelled. Suggestions are the words one edit away (swap, missing,
+   added or changed letter), looked up in the list, for words of up to 32 letters.
 
 A dictionary that is there but can't be read (encoding, size, parse error, no words) is skipped,
 and `dictionary_load_error(lang)` gives the reason; it never panics. Text in other languages is
 never checked against English: a language without its dictionary has no spelling marks.
 
-The core list is public domain. Every word is from the Moby Hyphenator II list by Grady Ward
-(Project Gutenberg eBook #3204, as in craft-i18n's `language-data/en-us/en-us.dic`); 50
-public-domain Project Gutenberg books only rank them by how often they are written in lower case.
-No other word list or dictionary was used. Regenerate with
-`cargo run -p craft-proof --example en_core -- <en-us.dic> 12000 crates/proof/data/en-core.txt <books…>`.
+`data/en-words.dic` is public domain: the Moby Hyphenator II list by Grady Ward (Project Gutenberg
+eBook #3204), from craft-i18n's `language-data/en-us/en-us.dic` with its break points dropped.
+Regenerate with
+`cargo run -p craft-proof --example en_words -- <craft-i18n>/language-data/en-us/en-us.dic crates/proof/data/en-words.dic`.
+`data/en-extra.txt` is WordCraft contributors' own list (MIT OR Apache-2.0); keep it in step with
+craft-i18n's copy.
 
 ## Check
 

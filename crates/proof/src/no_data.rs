@@ -1,6 +1,6 @@
 //! A build with no Language data embedded (no `CRAFT_I18N_DIR`): every public entry point still
-//! works and never panics. English spelling still marks obvious misspellings, against an English
-//! Hunspell dictionary installed on the system or else the core word list built into the crate;
+//! works and never panics. English spelling still marks misspellings, against an English
+//! Hunspell dictionary installed on the system or else the Moby word list built into the crate;
 //! the dialect variants and hyphenation that need the data are off, and grammar (code, not data)
 //! still works.
 
@@ -53,23 +53,25 @@ fn nothing_is_embedded() {
 }
 
 /// R6.4, English never goes unchecked: without the embedded word list, English is checked against
-/// an installed English Hunspell dictionary or, without one, the core word list. Either way an
-/// obvious misspelling is marked and common words are right. (Before, everything was right.)
+/// an installed English Hunspell dictionary or, without one, the Moby word list built into the
+/// crate. Either way a misspelling is marked and common words are right. (Before, everything was right.)
 #[test]
 fn english_spelling_still_marks_misspellings() {
     let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     for l in [ProofLang::En, ProofLang::EnGb, ProofLang::EnCa] {
         assert!(matches!(crate::english_source(l), Some(EnglishSource::Hunspell(_) | EnglishSource::CoreList)), "{l:?}");
-        assert!(!crate::is_correct_in("teh", l), "{l:?}");
-        assert!(crate::suggest_in("teh", 5, l).contains(&"the".to_string()), "{l:?}");
+        assert!(!crate::is_correct_in("becuase", l), "{l:?}");
+        assert!(crate::suggest_in("becuase", 5, l).contains(&"because".to_string()), "{l:?}");
         for w in ["the", "The", "house", "houses", "because", "running", "people", "beautiful", "don't"] {
             assert!(crate::is_correct_in(w, l), "{w} {l:?}");
         }
-        assert_eq!(crate::check_spelling_in("Teh house of the people", l).len(), 1, "{l:?}");
+        assert_eq!(crate::check_spelling_in("Becuase the house of the people", l).len(), 1, "{l:?}");
     }
-    assert!(!crate::is_correct("teh") && !crate::is_correct_with("teh", &Options::default()) && !crate::is_correct_for("teh", Some("en-GB")));
-    assert!(crate::suggest("teh", 5).contains(&"the".to_string()));
-    assert_eq!(crate::check_spelling("Teh house").len(), 1);
+    assert!(
+        !crate::is_correct("becuase") && !crate::is_correct_with("becuase", &Options::default()) && !crate::is_correct_for("becuase", Some("en-GB"))
+    );
+    assert!(crate::suggest("becuase", 5).contains(&"because".to_string()));
+    assert_eq!(crate::check_spelling("Becuase house").len(), 1);
     // The dialect variants are Language data: none without it.
     for w in ["colour", "color"] {
         assert_eq!(en_variants::preferred(w, ProofLang::En), None);

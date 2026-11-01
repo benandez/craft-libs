@@ -145,6 +145,24 @@ pub fn find(names: &[&str]) -> Option<(PathBuf, PathBuf)> {
     search_dirs(lo.as_deref()).into_iter().find_map(|dir| find_in(&dir, names))
 }
 
+/// Every `<name>.aff`/`<name>.dic` pair for `names`, in the order [`find`] prefers them: folder
+/// by folder ([`search_dirs`]), each folder's in the order of `names`. A caller that can't read
+/// one tries the next.
+pub fn candidates(names: &[&str]) -> Vec<(PathBuf, PathBuf)> {
+    let lo = names.first().copied().map(lo_ext_dirs);
+    let mut out: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for dir in search_dirs(lo.as_deref()) {
+        for n in names {
+            let aff = dir.join(format!("{n}.aff"));
+            let dic = dir.join(format!("{n}.dic"));
+            if aff.is_file() && dic.is_file() && !out.iter().any(|(_, d)| *d == dic) {
+                out.push((aff, dic));
+            }
+        }
+    }
+    out
+}
+
 /// The first `<name>.aff`/`<name>.dic` pair for any of `names` in `dir`.
 pub fn find_in(dir: &Path, names: &[&str]) -> Option<(PathBuf, PathBuf)> {
     names.iter().find_map(|n| {
@@ -181,6 +199,15 @@ pub fn load(aff: &Path, dic: &Path) -> Result<AffixDict, String> {
     let (aff_text, dic_text) = decode(&read_capped(aff)?, &read_capped(dic)?)?;
     let source = format!("Hunspell dictionary {}", dic.display());
     AffixDict::from_hunspell(&aff_text, &dic_text, &[source.as_str()])
+}
+
+/// [`load`] for an English dictionary: directives that only matter for other languages
+/// (compounding, output conversion) are ignored rather than refused
+/// ([`AffixDict::from_hunspell_english`]).
+pub fn load_english(aff: &Path, dic: &Path) -> Result<AffixDict, String> {
+    let (aff_text, dic_text) = decode(&read_capped(aff)?, &read_capped(dic)?)?;
+    let source = format!("Hunspell dictionary {}", dic.display());
+    AffixDict::from_hunspell_english(&aff_text, &dic_text, &[source.as_str()])
 }
 
 /// ISO 8859-1: every byte is the code point of the same value (the original VERO pt_BR uses it).

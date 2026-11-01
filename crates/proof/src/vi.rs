@@ -83,7 +83,7 @@ mod checker_tests {
         assert!(check_text_with(text, &[], &Options::default(), true, false).is_empty());
     }
 
-    /// Without the Language data too: the installed English dictionary or the core list marks
+    /// Without the Language data too: the installed English dictionary or the built-in word list marks
     /// `yesterdy` (R6.4).
     #[test]
     fn english_keeps_its_marks_and_skips_vietnamese_names() {
