@@ -6,8 +6,9 @@
 //! installed the language has no spelling check (no marks, no errors), like Word without the
 //! language's proofing tools.
 //!
-//! Search order: the directory in `WORDCRAFT_DICTIONARIES` (or one set with
-//! [`set_dictionary_dir`]), then the usual system locations. On the web there are none.
+//! Search order: the folder set with [`set_dictionary_dir`], the directory in
+//! `WORDCRAFT_DICTIONARIES`, WordCraft's own `dictionaries` folder under the user's application
+//! data (on every desktop system), then the usual system locations. On the web there are none.
 
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -104,6 +105,9 @@ pub fn search_dirs(lo_exts: Option<&[String]>) -> Vec<PathBuf> {
         }
     } else if cfg!(target_os = "macos") {
         if let Some(h) = &home {
+            // An app started from Finder or the Dock doesn't see `WORDCRAFT_DICTIONARIES`; this
+            // folder needs no setting (#1063).
+            dirs.push(h.join("Library/Application Support/WordCraft/dictionaries"));
             dirs.push(h.join("Library/Spelling"));
         }
         dirs.push(PathBuf::from("/Library/Spelling"));
@@ -111,6 +115,10 @@ pub fn search_dirs(lo_exts: Option<&[String]>) -> Vec<PathBuf> {
         dirs.push(PathBuf::from("/usr/local/share/hunspell"));
         dirs.extend(lo_dirs("/Applications/LibreOffice.app/Contents/Resources/extensions"));
     } else {
+        // Nor does one started from a desktop launcher (#1063).
+        if let Some(data) = xdg_data_home(std::env::var_os("XDG_DATA_HOME"), home.as_deref()) {
+            dirs.push(data.join("wordcraft").join("dictionaries"));
+        }
         if let Some(h) = &home {
             dirs.push(h.join(".local/share/hunspell"));
         }
@@ -122,6 +130,12 @@ pub fn search_dirs(lo_exts: Option<&[String]>) -> Vec<PathBuf> {
         }
     }
     dirs
+}
+
+/// The user's data folder on Linux and the BSDs: `$XDG_DATA_HOME` when it is an absolute path (the
+/// XDG Base Directory spec ignores a relative one), else `~/.local/share`.
+fn xdg_data_home(xdg: Option<std::ffi::OsString>, home: Option<&Path>) -> Option<PathBuf> {
+    xdg.map(PathBuf::from).filter(|p| p.is_absolute()).or_else(|| home.map(|h| h.join(".local/share")))
 }
 
 /// The first `<name>.aff`/`<name>.dic` pair found for any of `names` (`pl_PL`, `pl`), searching
@@ -467,6 +481,42 @@ fn decode_utf8_dic(dic: &[u8]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WordCraft's own dictionaries folder under the user's application data is searched on every
+    /// desktop system, after the setting and before the shared system locations (#1063).
+    #[test]
+    fn the_app_folder_comes_before_the_system_locations() {
+        if cfg!(target_arch = "wasm32") {
+            return;
+        }
+        let user = if cfg!(windows) { "LOCALAPPDATA" } else { "HOME" };
+        if std::env::var_os(user).filter(|v| !v.is_empty()).is_none() {
+            return; // no user folder to derive it from
+        }
+        let dirs = search_dirs(None);
+        let at = |suffix: &str| dirs.iter().position(|d| d.ends_with(suffix));
+        let (app, shared) = if cfg!(windows) {
+            ("WordCraft/dictionaries", "hunspell")
+        } else if cfg!(target_os = "macos") {
+            ("Application Support/WordCraft/dictionaries", "/Library/Spelling")
+        } else {
+            ("wordcraft/dictionaries", "/usr/share/hunspell")
+        };
+        assert!(matches!((at(app), at(shared)), (Some(app), Some(shared)) if app < shared), "{dirs:?}");
+    }
+
+    /// `$XDG_DATA_HOME` counts only as an absolute path; otherwise (unset, empty or relative) the
+    /// spec's default `~/.local/share` applies, and with no home there is no folder.
+    #[test]
+    fn xdg_data_home_follows_the_spec() {
+        let home = Path::new("/home/a");
+        assert_eq!(xdg_data_home(Some("/data".into()), Some(home)), Some(PathBuf::from("/data")));
+        assert_eq!(xdg_data_home(Some("/data".into()), None), Some(PathBuf::from("/data")));
+        for xdg in [None, Some(""), Some("relative/data")] {
+            assert_eq!(xdg_data_home(xdg.map(Into::into), Some(home)), Some(home.join(".local/share")), "{xdg:?}");
+            assert_eq!(xdg_data_home(xdg.map(Into::into), None), None, "{xdg:?}");
+        }
+    }
 
     #[test]
     fn decodes_latin2_and_utf8() {
