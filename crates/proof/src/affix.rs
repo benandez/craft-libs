@@ -18,7 +18,8 @@
 //! products, continuation classes on suffixes (at most two suffixes in a row, as in Hunspell),
 //! `FORBIDDENWORD`, `NOSUGGEST`, `KEEPCASE` (the stem is a word only in its own letter case),
 //! `NEEDAFFIX`, `CIRCUMFIX`, `FULLSTRIP`, input conversion (`ICONV`: ligatures such as `ﬁ` read as
-//! `fi`) and ignored characters (`IGNORE`), and the suggestion tables `TRY`, `KEY`, `MAP` and `REP`.
+//! `fi`), output conversion of suggestions (`OCONV`) and ignored characters (`IGNORE`), and the
+//! suggestion tables `TRY`, `KEY`, `MAP` and `REP`.
 //! Compounds by `COMPOUNDRULE` (patterns of flags with `*` and `?`, as SCOWL's English
 //! dictionaries use for ordinals: `21st`, `112th`; with long or numeric flags each flag is written
 //! in parentheses, `(aa)*(bb)`), with `ONLYINCOMPOUND` and `COMPOUNDMIN`; the parts of such a
@@ -46,6 +47,14 @@ const MAX_INFLATED: usize = 64 << 20;
 pub const MAX_WORD_BYTES: usize = 120;
 /// Empty slot in the stem hash table.
 const EMPTY: u32 = u32::MAX;
+/// Longest input converted (`ICONV`) and stripped of `IGNORE` characters before a lookup: longer
+/// input can't come down to [`MAX_WORD_BYTES`] in a real dictionary, so it is no word and is
+/// never converted (the conversion would cost time on hostile input for nothing).
+const MAX_INPUT_BYTES: usize = 4 * MAX_WORD_BYTES;
+/// Most pairs an `ICONV` or `OCONV` table may hold (the Korean dictionary's hold 11,172 each).
+const MAX_CONV_PAIRS: usize = 1 << 16;
+/// Longest text on either side of an `ICONV` or `OCONV` pair, in bytes.
+const MAX_CONV_BYTES: usize = 64;
 /// Most flags one `.dic` entry or one continuation class field may carry. Real dictionaries use a
 /// few hundred at most (Belarusian: 264); a longer field is hostile and is refused (`.aff`) or
 /// skipped (`.dic`, though its `FORBIDDENWORD` and `NOSUGGEST` flags still apply to the word).
@@ -77,7 +86,6 @@ const UNSUPPORTED: &[&str] = &[
     "COMPOUNDLAST",
     "COMPOUNDMIDDLE",
     "COMPOUNDPERMITFLAG",
-    "OCONV",
     "PSEUDOROOT",
 ];
 
@@ -297,8 +305,10 @@ pub struct AffixDict {
     circumfix: Option<u16>,
     /// `FULLSTRIP`: an affix may strip (and so replace) a whole stem.
     full_strip: bool,
-    /// `ICONV`: input conversions applied before a lookup, `(from, to)`.
-    iconv: Vec<(String, String)>,
+    /// `ICONV`: input conversions applied before a lookup.
+    iconv: Conv,
+    /// `OCONV`: output conversions applied to suggestions.
+    oconv: Conv,
     /// `IGNORE`: characters removed from input words (and from the stems and appended texts).
     ignore: Box<[char]>,
     /// Provenance and licence lines, kept through [`AffixDict::to_bytes`].
@@ -316,6 +326,73 @@ pub struct AffixDict {
     /// `COMPOUNDRULE`), so a word starting otherwise is no compound: SCOWL's ordinals start with
     /// a digit, and a misspelled word costs one lookup here instead of one per cut.
     compound_firsts: Vec<char>,
+}
+
+/// An `ICONV` or `OCONV` table: `(from, to)` pairs in source order, found by the first character
+/// of `from` so that converting a word costs a look at the few pairs that could start at each
+/// character, not at the whole table (the Korean tables hold 11,172 pairs each).
+#[derive(Clone, Debug, Default)]
+struct Conv {
+    pairs: Vec<(String, String)>,
+    /// First character of `from` → indices into `pairs`, longest `from` first (of equal ones, the
+    /// later pair first: it is the one that wins).
+    by_first: FxMap<char, Vec<u32>>,
+}
+
+impl Conv {
+    /// The table of `pairs` (checked by [`Rules::push_conv`]: non-empty `from`, bounded sizes).
+    fn new(pairs: Vec<(String, String)>) -> Conv {
+        let mut by_first: FxMap<char, Vec<u32>> = FxMap::default();
+        for (i, (from, _)) in pairs.iter().enumerate() {
+            if let (Some(c), Ok(i)) = (from.chars().next(), u32::try_from(i)) {
+                by_first.entry(c).or_default().push(i);
+            }
+        }
+        for list in by_first.values_mut() {
+            list.sort_by_key(|&i| (std::cmp::Reverse(pairs.get(i as usize).map_or(0, |p| p.0.len())), std::cmp::Reverse(i)));
+        }
+        Conv { pairs, by_first }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
+
+    /// The pair to apply at the start of `rest`: the longest `from` that starts it.
+    fn at(&self, rest: &str) -> Option<&(String, String)> {
+        let c = rest.chars().next()?;
+        self.by_first.get(&c)?.iter().filter_map(|&i| self.pairs.get(i as usize)).find(|(from, _)| rest.starts_with(from.as_str()))
+    }
+
+    /// `w` converted: at each position the longest matching `from` is replaced by its `to`, and
+    /// characters in `drop` are removed (outside the replacements too). Borrowed when nothing
+    /// changes.
+    fn apply<'a>(&self, w: &'a str, drop: &[char]) -> std::borrow::Cow<'a, str> {
+        if self.is_empty() && drop.is_empty() {
+            return std::borrow::Cow::Borrowed(w);
+        }
+        // One pass: the input is copied only from the first change on.
+        let mut out: Option<String> = None;
+        let mut rest = w;
+        while let Some(c) = rest.chars().next() {
+            let done = w.get(..w.len() - rest.len()).unwrap_or_default();
+            match self.at(rest) {
+                Some((from, to)) => {
+                    out.get_or_insert_with(|| done.to_string()).extend(to.chars().filter(|c| !drop.contains(c)));
+                    rest = rest.get(from.len()..).unwrap_or_default();
+                }
+                None => {
+                    if drop.contains(&c) {
+                        out.get_or_insert_with(|| done.to_string());
+                    } else if let Some(o) = out.as_mut() {
+                        o.push(c);
+                    }
+                    rest = rest.get(c.len_utf8()..).unwrap_or_default();
+                }
+            }
+        }
+        out.map_or(std::borrow::Cow::Borrowed(w), std::borrow::Cow::Owned)
+    }
 }
 
 fn hash_str(s: &str) -> u64 {
@@ -389,6 +466,7 @@ struct Rules {
     circumfix: Option<FlagKey>,
     full_strip: bool,
     iconv: Vec<(String, String)>,
+    oconv: Vec<(String, String)>,
     ignore: Vec<char>,
     /// `COMPOUNDRULE` patterns, as written (`n*1t`); read in the `FLAG` mode by
     /// [`AffixDict::build`], since the `FLAG` line may come after them.
@@ -420,6 +498,22 @@ impl Rules {
             return Err(format!("FLAG {name} after flags were read"));
         }
         self.mode = mode;
+        Ok(())
+    }
+
+    /// Add a pair to the `ICONV` (`output` false) or `OCONV` table: at most [`MAX_CONV_PAIRS`]
+    /// pairs of at most [`MAX_CONV_BYTES`] each side. A pair with nothing to convert is skipped.
+    fn push_conv(&mut self, output: bool, from: &str, to: &str) -> Result<(), String> {
+        let (name, table) = if output { ("OCONV", &mut self.oconv) } else { ("ICONV", &mut self.iconv) };
+        if from.len() > MAX_CONV_BYTES || to.len() > MAX_CONV_BYTES {
+            return Err(format!("{name} pair longer than {MAX_CONV_BYTES} bytes"));
+        }
+        if table.len() >= MAX_CONV_PAIRS {
+            return Err(format!("{name} table larger than {MAX_CONV_PAIRS} pairs"));
+        }
+        if !from.is_empty() {
+            table.push((from.to_string(), to.to_string()));
+        }
         Ok(())
     }
 
@@ -715,6 +809,7 @@ fn parse_aff(aff: &str, english: bool) -> Result<Rules, String> {
     let mut af_header = false;
     let mut iconv_header = false;
     let mut compound_header = false;
+    let mut oconv_header = false;
     for (n, line) in aff.lines().enumerate() {
         let f: Vec<&str> = split_fields(line).collect();
         let Some(&dir) = f.first() else { continue };
@@ -729,7 +824,7 @@ fn parse_aff(aff: &str, english: bool) -> Result<Rules, String> {
             // the words it marks are correct.
             "AM" | "LEMMA_PRESENT" => {}
             "SUBSTANDARD" => r.substandard = Some(r.one_flag(at(1)).map_err(|e| format!("line {}: {dir} needs one flag: {e}", n + 1))?),
-            // The first `AF` or `ICONV` line is the table's count, as in Hunspell, even with a
+            // The first `AF`, `ICONV` or `OCONV` line is the table's count, as in Hunspell, even with a
             // trailing comment (`AF 1559 # aliases`).
             "AF" => {
                 if !af_header {
@@ -744,11 +839,12 @@ fn parse_aff(aff: &str, english: bool) -> Result<Rules, String> {
                     r.aliases.push(at(1).to_string());
                 }
             }
-            "ICONV" => {
-                if !iconv_header && at(1).parse::<usize>().is_ok() {
-                    iconv_header = true;
+            "ICONV" | "OCONV" => {
+                let header = if dir == "OCONV" { &mut oconv_header } else { &mut iconv_header };
+                if !*header && at(1).parse::<usize>().is_ok() {
+                    *header = true;
                 } else if f.len() >= 3 {
-                    r.iconv.push((at(1).to_string(), at(2).to_string()));
+                    r.push_conv(dir == "OCONV", at(1), at(2)).map_err(|e| format!("line {}: {e}", n + 1))?;
                 }
             }
             "IGNORE" => r.ignore = at(1).chars().collect(),
@@ -989,7 +1085,8 @@ impl AffixDict {
             circumfix: rules.circumfix.and_then(id_of),
             full_strip: rules.full_strip,
             flag_mode: mode,
-            iconv: rules.iconv,
+            iconv: Conv::new(rules.iconv),
+            oconv: Conv::new(rules.oconv),
             ignore: rules.ignore.into_boxed_slice(),
             try_chars: rules.try_chars,
             key: rules.key,
@@ -1354,33 +1451,19 @@ impl AffixDict {
     }
 
     /// `w` after the `ICONV` conversions (at each position the longest match wins) and without
-    /// the `IGNORE` characters.
+    /// the `IGNORE` characters. Input longer than [`MAX_INPUT_BYTES`] is no word and comes back
+    /// unchanged, so the length check after this rejects it without converting it.
     fn normalize<'a>(&self, w: &'a str) -> std::borrow::Cow<'a, str> {
-        if self.iconv.is_empty() && self.ignore.is_empty() {
+        if w.len() > MAX_INPUT_BYTES {
             return std::borrow::Cow::Borrowed(w);
         }
-        // One pass: the input is copied only from the first change on.
-        let mut out: Option<String> = None;
-        let mut rest = w;
-        while let Some(c) = rest.chars().next() {
-            let done = w.get(..w.len() - rest.len()).unwrap_or_default();
-            let hit = self.iconv.iter().filter(|(from, _)| !from.is_empty() && rest.starts_with(from.as_str())).max_by_key(|(from, _)| from.len());
-            match hit {
-                Some((from, to)) => {
-                    out.get_or_insert_with(|| done.to_string()).extend(to.chars().filter(|c| !self.ignore.contains(c)));
-                    rest = rest.get(from.len()..).unwrap_or_default();
-                }
-                None => {
-                    if self.ignore.contains(&c) {
-                        out.get_or_insert_with(|| done.to_string());
-                    } else if let Some(o) = out.as_mut() {
-                        o.push(c);
-                    }
-                    rest = rest.get(c.len_utf8()..).unwrap_or_default();
-                }
-            }
-        }
-        out.map_or(std::borrow::Cow::Borrowed(w), std::borrow::Cow::Owned)
+        self.iconv.apply(w, &self.ignore)
+    }
+
+    /// A suggestion as it is shown: `w` after the `OCONV` conversions (the French dictionary
+    /// writes `’` for the `'` its stems use).
+    pub fn output<'a>(&self, w: &'a str) -> std::borrow::Cow<'a, str> {
+        self.oconv.apply(w, &[])
     }
 
     /// [`AffixDict::contains`] on normalized input, where stems carrying an `excluded` flag
@@ -1767,8 +1850,10 @@ impl AffixDict {
                 out.push('\n');
             }
         }
-        for (a, b) in &self.iconv {
-            out.push_str(&format!("ICONV {a} {b}\n"));
+        for (name, table) in [("ICONV", &self.iconv), ("OCONV", &self.oconv)] {
+            for (a, b) in &table.pairs {
+                out.push_str(&format!("{name} {a} {b}\n"));
+            }
         }
         if !self.ignore.is_empty() {
             out.push_str(&format!("IGNORE {}\n", self.ignore.iter().collect::<String>()));
@@ -1870,7 +1955,9 @@ impl AffixDict {
                         _ => rules.circumfix = Some(c),
                     }
                 }
-                "ICONV" if f.len() == 3 => rules.iconv.push((at(1).to_string(), at(2).to_string())),
+                conv @ ("ICONV" | "OCONV") if f.len() == 3 => {
+                    rules.push_conv(conv == "OCONV", at(1), at(2)).map_err(|e| format!("affix dictionary: {e}"))?;
+                }
                 "IGNORE" => rules.ignore = at(1).chars().collect(),
                 "COMPOUNDMIN" => {
                     let min = at(1).parse::<usize>().map_err(|_| format!("affix dictionary: bad `{line}`"))?;
@@ -2413,6 +2500,58 @@ pub(crate) mod tests {
             let back = AffixDict::from_bytes(&d.to_bytes().unwrap()).unwrap();
             assert_eq!(back.check("ac"), d.check("ac"));
         }
+    }
+
+    #[test]
+    fn oconv_converts_suggestions_only() {
+        // Answers as Hunspell 1.7 gives them on the same files: `kbt` → `k’t`.
+        let aff = "SET UTF-8\nTRY ab\nOCONV 1\nOCONV a ’\n";
+        let d = AffixDict::from_hunspell(aff, "1\nkat\n", &[]).unwrap();
+        assert!(d.check("kat") && !d.check("k’t"), "OCONV doesn't change what is correct");
+        assert_eq!(d.output("kat"), "k’t");
+        assert!(matches!(d.output("kot"), std::borrow::Cow::Borrowed("kot")));
+        assert_eq!(crate::affix_suggest::suggest_in(&d, "kbt", 4, &crate::affix_suggest::Tuning::DEFAULT), ["k’t"]);
+        let back = AffixDict::from_bytes(&d.to_bytes().unwrap()).unwrap();
+        assert_eq!(back.output("kat"), "k’t");
+        // The count line may carry a comment, as for ICONV.
+        let d = AffixDict::from_hunspell("OCONV 1 # apostrophes\nOCONV ' ’\n", "1\nl'eau\n", &[]).unwrap();
+        assert_eq!(d.output("l'eau"), "l’eau");
+    }
+
+    #[test]
+    fn conversions_take_the_longest_match_and_the_later_of_equal_ones() {
+        let aff = "ICONV 3\nICONV a x\nICONV ab y\nICONV a z\n";
+        let d = AffixDict::from_hunspell(aff, "2\ny\nzc\n", &[]).unwrap();
+        assert_eq!(d.normalize("ab"), "y");
+        assert_eq!(d.normalize("ac"), "zc");
+        assert!(d.check("ab") && d.check("ac"));
+    }
+
+    #[test]
+    fn conversion_tables_are_capped() {
+        let pairs = |n: usize| (0..n).map(|i| format!("ICONV q{i} r\n")).collect::<String>();
+        let ok = AffixDict::from_hunspell(&format!("ICONV {MAX_CONV_PAIRS}\n{}", pairs(MAX_CONV_PAIRS)), "1\nr\n", &[]).unwrap();
+        assert!(ok.check("q65535") && !ok.check("q65536"));
+        let err = AffixDict::from_hunspell(&format!("ICONV 1\n{}", pairs(MAX_CONV_PAIRS + 1)), "1\nr\n", &[]).unwrap_err();
+        assert!(err.contains("ICONV table larger"), "{err}");
+        let long = "x".repeat(MAX_CONV_BYTES + 1);
+        for aff in [format!("ICONV 1\nICONV {long} y\n"), format!("OCONV 1\nOCONV y {long}\n")] {
+            assert!(AffixDict::from_hunspell(&aff, "1\nr\n", &[]).is_err(), "{aff}");
+        }
+        let raw = format!("{MAGIC}\nOCONV {long} y\nWORDS\n\0kot\n");
+        assert!(AffixDict::from_bytes(&miniz_oxide::deflate::compress_to_vec(raw.as_bytes(), 6)).is_err());
+    }
+
+    #[test]
+    fn long_input_is_rejected_before_it_is_converted() {
+        let d = AffixDict::from_hunspell("ICONV 1\nICONV ﬁ fi\nIGNORE -\n", "1\nfine\n", &[]).unwrap();
+        // Ignored characters may take a word past MAX_WORD_BYTES and still leave a word.
+        let spaced = "f-i-n-e".to_string() + &"-".repeat(MAX_WORD_BYTES);
+        assert!(spaced.len() > MAX_WORD_BYTES && spaced.len() <= MAX_INPUT_BYTES && d.check(&spaced));
+        // Past MAX_INPUT_BYTES the input is no word and is returned as it is, unconverted.
+        let long = "ﬁ".repeat(MAX_INPUT_BYTES);
+        assert!(matches!(d.normalize(&long), std::borrow::Cow::Borrowed(_)));
+        assert!(!d.check(&long) && !d.contains(&long) && !d.can_suggest(&long));
     }
 
     #[test]

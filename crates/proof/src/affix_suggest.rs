@@ -327,6 +327,8 @@ pub(crate) fn suggest_in(d: &AffixDict, word: &str, max: usize, t: &Tuning) -> V
         };
         // A KEEPCASE word only exists in its dictionary case: `Km` would be flagged, so offer `km`.
         let t = if recased != text && text.split(' ').any(|p| d.case_locked(p)) { text } else { recased };
+        // Shown as the dictionary's OCONV table writes it (`'` → `’` in French).
+        let t = d.output(&t).into_owned();
         if t != word && !out.contains(&t) {
             out.push(t);
         }
