@@ -3007,6 +3007,21 @@ pub(crate) mod tests {
             let _ = AffixDict::from_bytes(&miniz_oxide::deflate::compress_to_vec(&bytes, 1));
         }
 
+        /// FULLSTRIP, NEEDAFFIX and CIRCUMFIX on hostile stems and words: no panic, and every
+        /// form `forms()` lists is one the checker accepts.
+        #[test]
+        fn needaffix_circumfix_and_fullstrip_never_panic(stem in "[abx]{0,4}", word in "\\PC{0,12}") {
+            let aff = "SET UTF-8\nFULLSTRIP\nNEEDAFFIX N\nCIRCUMFIX C\nPFX P Y 2\nPFX P a 0/C .\nPFX P 0 x/N a\nSFX S Y 3\nSFX S b 0/C b\nSFX S 0 x/NT .\nSFX S ab y .\nSFX T Y 1\nSFX T x 0 .\n";
+            if let Ok(d) = AffixDict::from_hunspell(aff, &format!("2\n{stem}/PSN\n{stem}b/PS\n"), &[]) {
+                let _ = d.check(&word);
+                for s in [stem.clone(), format!("{stem}b")] {
+                    for f in d.forms(&s) {
+                        proptest::prop_assert!(!f.is_empty() && d.contains(&f), "{s} → {f:?}");
+                    }
+                }
+            }
+        }
+
         #[test]
         fn any_flag_field_reads_without_panicking(field in "[0-9,a-zA-Z!\u{fe0f}\u{1f6ab}]{0,24}", word in "\\PC{0,12}") {
             for mode in ["num", "long", "UTF-8"] {
