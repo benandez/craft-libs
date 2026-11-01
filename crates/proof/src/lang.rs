@@ -27,7 +27,8 @@ pub enum ProofLang {
     /// There is no Bulgarian dictionary or grammar yet, so, as for [`ProofLang::Other`], no
     /// spelling or grammar marks.
     Bg,
-    /// Portuguese (`pt`, `pt-BR`, `pt-PT`): the installed Hunspell dictionary (VERO and
+    /// Portuguese (`pt`, `pt-BR`; `pt-PT` is [`ProofLang::Pack`] `pt-pt`, with its own dictionary
+    /// and these grammar rules and patterns): the installed Hunspell dictionary (VERO and
     /// friends, when there is one), the Portuguese grammar rules and the Portuguese hyphenation
     /// patterns.
     Pt,
@@ -66,7 +67,8 @@ pub enum ProofLang {
     /// dictionary (else the neighbouring Rioplatense `es_AR`, a Latin American or a generic one),
     /// and the `vos` forms of verbs (`tenés`, `vení`, `decime`) accepted ([`crate::es::voseo`]).
     EsUy,
-    /// German (`de`, `de-DE`, `de-AT`, `de-CH`…): hyphenation by the German patterns (reformed
+    /// German (`de`, `de-DE`, `de-AT`…; `de-CH` and `de-LI` are [`ProofLang::Pack`] `de-ch`, with
+    /// their own dictionary and these patterns): hyphenation by the German patterns (reformed
     /// spelling). There is no German dictionary or grammar yet, so, as for [`ProofLang::Other`],
     /// no spelling or grammar marks.
     De,
@@ -118,7 +120,12 @@ impl ProofLang {
         } else if primary.eq_ignore_ascii_case("bg") || primary.eq_ignore_ascii_case("bul") {
             ProofLang::Bg
         } else if primary.eq_ignore_ascii_case("pt") || primary.eq_ignore_ascii_case("por") {
-            ProofLang::Pt
+            // European Portuguese spells differently: its own dictionary (`pt_PT`, a `pt-pt` pack).
+            if region(tag).is_some_and(|r| r.eq_ignore_ascii_case("PT")) {
+                PackLocale::new("pt-PT").map_or(ProofLang::Pt, ProofLang::Pack)
+            } else {
+                ProofLang::Pt
+            }
         } else if primary.eq_ignore_ascii_case("it") || primary.eq_ignore_ascii_case("ita") {
             ProofLang::It
         } else if primary.eq_ignore_ascii_case("hr") || primary.eq_ignore_ascii_case("hrv") {
@@ -134,7 +141,13 @@ impl ProofLang {
         } else if primary.eq_ignore_ascii_case("es") || primary.eq_ignore_ascii_case("spa") {
             ProofLang::spanish(tag)
         } else if ["de", "deu", "ger"].iter().any(|c| primary.eq_ignore_ascii_case(c)) {
-            ProofLang::De
+            // Swiss (and Liechtenstein) German spells without ß: its own dictionary (`de_CH`, a
+            // `de-ch` pack).
+            if region(tag).is_some_and(|r| r.eq_ignore_ascii_case("CH") || r.eq_ignore_ascii_case("LI")) {
+                PackLocale::new("de-CH").map_or(ProofLang::De, ProofLang::Pack)
+            } else {
+                ProofLang::De
+            }
         } else {
             PackLocale::new(tag).map_or(ProofLang::Other, ProofLang::Pack)
         }
@@ -160,6 +173,17 @@ impl ProofLang {
             Some(r) if r.eq_ignore_ascii_case("UY") => ProofLang::EsUy,
             Some(r) if LATIN_AMERICA.iter().any(|l| l.eq_ignore_ascii_case(r)) => ProofLang::Es419,
             _ => ProofLang::Es,
+        }
+    }
+
+    /// The built-in language whose hyphenation, grammar and messages a regional
+    /// [`ProofLang::Pack`] language shares: German for `de-ch`, Portuguese for `pt-pt` (their
+    /// spelling is their own). Any other language is itself.
+    pub(crate) fn built_in(self) -> ProofLang {
+        match self {
+            ProofLang::Pack(l) if l.primary() == "de" => ProofLang::De,
+            ProofLang::Pack(l) if l.primary() == "pt" => ProofLang::Pt,
+            other => other,
         }
     }
 
@@ -329,7 +353,7 @@ pub(crate) fn effective_script(tag: &str) -> Option<String> {
 
 /// The region of a tag: the first two-letter or three-digit subtag after the language and
 /// script, before any singleton; a POSIX `.UTF-8` or `@…` tail is ignored.
-fn region(tag: &str) -> Option<&str> {
+pub(crate) fn region(tag: &str) -> Option<&str> {
     let tag = tag.split(['.', '@']).next().unwrap_or("");
     // Subtags after a singleton (`x-…` private use, `u-…` extensions) aren't regions.
     tag.split(['-', '_'])
@@ -420,7 +444,10 @@ mod tests {
     #[test]
     fn tags_resolve_primary_languages() {
         assert_tags(&["pl", "pl-PL", "PL-pl", "pl_PL", "pl_PL.UTF-8", " pl-PL ", "pol"], ProofLang::Pl);
-        assert_tags(&["pt", "pt-BR", "PT_br", "pt-BR.UTF-8", " pt-PT ", "por"], ProofLang::Pt);
+        assert_tags(&["pt", "pt-BR", "PT_br", "pt-BR.UTF-8", "pt-AO", "por"], ProofLang::Pt);
+        let pt_pt = ProofLang::Pack(PackLocale::new("pt-pt").unwrap());
+        assert_tags(&[" pt-PT ", "pt_PT.UTF-8", "por-PT"], pt_pt);
+        assert_eq!((pt_pt.built_in(), ProofLang::Pt.built_in()), (ProofLang::Pt, ProofLang::Pt));
         assert_tags(&["it", "it-IT", "IT_it", "it-CH", "it-CH.UTF-8", " it-IT ", "ita"], ProofLang::It);
         assert_tags(&["cs", "cs-CZ", "CS-cz", "cs_CZ", " ces ", "CES", "cze", "CZE"], ProofLang::Cs);
         assert_tags(&["id", "id-ID", "ID-id", "id_ID", "id_ID.UTF-8", " id-ID ", "ind", "in", "in_ID"], ProofLang::Id);
@@ -467,7 +494,10 @@ mod tests {
     fn tags_resolve_additional_locales_and_defaults() {
         assert_tags(&["bg", "bg-BG", "BG_bg", "bg_BG.UTF-8", "bul"], ProofLang::Bg);
         assert_tags(&["tr", "tr-TR", "tr-CY", "TR_tr", "tur"], ProofLang::Tr);
-        assert_tags(&["de", "de-DE", "de-CH", "DE_at", "deu", "ger"], ProofLang::De);
+        assert_tags(&["de", "de-DE", "DE_at", "deu", "ger"], ProofLang::De);
+        let de_ch = ProofLang::Pack(PackLocale::new("de-ch").unwrap());
+        assert_tags(&["de-CH", "de_CH.UTF-8", "de-LI"], de_ch);
+        assert_eq!(de_ch.built_in(), ProofLang::De);
         assert_tags(&["ru", "ru-RU", "RU-ru", "ru_RU", "ru_RU.UTF-8", " ru-RU ", "rus"], ProofLang::Ru);
         assert!(!ProofLang::De.is_proofed());
         assert!(!ProofLang::Bg.is_proofed());

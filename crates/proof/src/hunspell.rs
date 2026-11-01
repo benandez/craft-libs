@@ -161,10 +161,10 @@ pub fn find(names: &[&str]) -> Option<(PathBuf, PathBuf)> {
 ///
 /// 1. the dictionaries folders ([`set_dictionary_dir`] and the others of [`search_dirs`]), any
 ///    of `names`;
-/// 2. an installed Language pack of the first name's region or of the language alone
-///    ([`crate::packs`], `spelling.aff`/`spelling.dic`);
+/// 2. an installed Language pack of the first name's region ([`crate::packs`],
+///    `spelling.aff`/`spelling.dic`; the bare `es` and `de` packs are Spain's and Germany's);
 /// 3. the system's folders, the first name's region (`pt_BR`, `pt-BR`);
-/// 4. any other installed pack of the language (another region: `pt-pt`);
+/// 4. any other installed pack of the language (another region: `pt-pt`, the bare `pt`);
 /// 5. the system's folders, the other names (`pt`).
 pub fn candidates(names: &[&str]) -> Vec<(PathBuf, PathBuf)> {
     let lo = names.first().copied().map(lo_ext_dirs);
@@ -174,7 +174,7 @@ pub fn candidates(names: &[&str]) -> Vec<(PathBuf, PathBuf)> {
 }
 
 /// [`candidates`] over the given folders.
-fn ordered(names: &[&str], dirs: &[PathBuf], region_packs: &[PathBuf], system: &[PathBuf], other_packs: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
+pub(crate) fn ordered(names: &[&str], dirs: &[PathBuf], region_packs: &[PathBuf], system: &[PathBuf], other_packs: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
     let norm = |n: &str| n.to_ascii_lowercase().replace('_', "-");
     let first = names.first().map(|n| norm(n));
     let (region, rest): (Vec<&str>, Vec<&str>) = names.iter().copied().partition(|n| Some(norm(n)) == first);

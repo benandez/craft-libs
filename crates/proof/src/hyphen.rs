@@ -133,10 +133,13 @@ fn core_breaks(core: &[char], lang: ProofLang) -> (Vec<usize>, Source) {
     // word in the language's script; any other word goes on as before (a Latin word in a Russian
     // run is hyphenated as English).
     if let Some(p) = crate::packs::hyphenation(lang)
-        && pack_patterns_fit(lang, &p, core)
+        && pack_patterns_fit(lang.built_in(), &p, core)
     {
         return if lang == ProofLang::Pl { core_breaks_pl_with(&p, core) } else { core_breaks_patterns(&p, core) };
     }
+    // Swiss German and European Portuguese without patterns of their own use German's and
+    // Portuguese's.
+    let lang = lang.built_in();
     if lang == ProofLang::Pl {
         return core_breaks_pl(core);
     }

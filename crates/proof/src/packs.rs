@@ -424,6 +424,16 @@ fn locales_for(names: &[&str]) -> Vec<String> {
     out
 }
 
+/// The locale a pack stands for: the bare `es` pack is Spain's (`es-es`) and the bare `de` pack
+/// Germany's (`de-de`), as their sources are; any other pack is its locale.
+fn pack_region(locale: &str) -> &str {
+    match locale {
+        "es" => "es-es",
+        "de" => "de-de",
+        l => l,
+    }
+}
+
 /// Are two tags written in the same script ([`crate::lang::effective_script`])?
 fn same_script(a: &str, b: &str) -> bool {
     crate::lang::effective_script(a) == crate::lang::effective_script(b)
@@ -436,7 +446,7 @@ fn packs_for(locales: &[String], has: impl Fn(&Holds) -> bool) -> Vec<PathBuf> {
     let usable = || scan.packs.iter().filter(|(_, h)| has(h));
     let mut out: Vec<PathBuf> = Vec::new();
     for l in locales {
-        if let Some((p, _)) = usable().find(|(p, _)| &p.locale == l) {
+        if let Some((p, _)) = usable().find(|(p, _)| pack_region(&p.locale) == l) {
             out.push(p.path.clone());
         }
     }
@@ -453,8 +463,8 @@ fn packs_for(locales: &[String], has: impl Fn(&Holds) -> bool) -> Vec<PathBuf> {
 
 /// The folders of the installed packs with a spelling dictionary for the Hunspell dictionary
 /// `names` (`pt_BR`, `pt-BR`, `pt`), best first ([`crate::hunspell::find`] reads them), in two
-/// tiers: the packs of the first name's own region (`pt-br`) or of the language alone (`pt`), then
-/// every other one (the other names' regions, then any other region of the language: `pt-pt`).
+/// tiers: the pack of the first name's own region ([`region_locales`]: `pt-br`), then every other
+/// one (the other names' regions, then any other region of the language: `pt-pt`, `pt`).
 /// The system's exact-region dictionaries are searched between the two, so another region's pack
 /// never beats them.
 pub(crate) fn spelling_dirs(names: &[&str]) -> (Vec<PathBuf>, Vec<PathBuf>) {
@@ -464,7 +474,7 @@ pub(crate) fn spelling_dirs(names: &[&str]) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let all = packs_for(&locales_for(names), |h| h.spelling);
     let region = region_locales(names);
     let scan = scan();
-    let in_region = |path: &PathBuf| scan.packs.iter().any(|(p, _)| &p.path == path && region.contains(&p.locale));
+    let in_region = |path: &PathBuf| scan.packs.iter().any(|(p, _)| &p.path == path && region.iter().any(|r| r == pack_region(&p.locale)));
     all.into_iter().partition(in_region)
 }
 
@@ -478,7 +488,7 @@ pub(crate) fn exact_spelling_dirs(names: &[&str]) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for n in names {
         let l = n.to_ascii_lowercase().replace('_', "-");
-        if let Some((p, _)) = scan.packs.iter().find(|(p, h)| h.spelling && p.locale == l)
+        if let Some((p, _)) = scan.packs.iter().find(|(p, h)| h.spelling && pack_region(&p.locale) == l)
             && !out.contains(&p.path)
         {
             out.push(p.path.clone());
@@ -487,13 +497,15 @@ pub(crate) fn exact_spelling_dirs(names: &[&str]) -> Vec<PathBuf> {
     out
 }
 
-/// The pack locales of `names`' own region: the first name's (`pt_BR` → `pt-br`) and the language
-/// alone (`pt`) when it is written in the same script.
+/// The pack locales of `names`' own region: the first name's (`pt_BR` → `pt-br`, `es_ES` →
+/// `es-es`, which the bare `es` pack is), and, when it names no region (`sr_Cyrl`), the language
+/// alone (`sr`) if it is written in the same script. A region's language-alone pack (`fr` for
+/// `fr_CA`) is another region's: it comes after the system's dictionary of the right region.
 pub(crate) fn region_locales(names: &[&str]) -> Vec<String> {
     let Some(first) = names.first() else { return Vec::new() };
     let mut out = vec![first.to_ascii_lowercase().replace('_', "-")];
     let primary = first.split(['_', '-']).next().unwrap_or_default().to_ascii_lowercase();
-    if same_script(first, &primary) && !out.contains(&primary) {
+    if crate::lang::region(first).is_none() && same_script(first, &primary) && !out.contains(&primary) {
         out.push(primary);
     }
     out.retain(|l| is_locale(l));
@@ -610,8 +622,10 @@ mod tests {
     #[test]
     fn dictionary_names_map_to_pack_locales() {
         assert_eq!(locales_for(&["pt_BR", "pt-BR", "pt"]), ["pt-br", "pt"]);
-        assert_eq!(region_locales(&["pt_BR", "pt-BR", "pt"]), ["pt-br", "pt"]);
-        assert_eq!(region_locales(&["en_US", "en-US", "en", "en_GB"]), ["en-us", "en"]);
+        assert_eq!(region_locales(&["pt_BR", "pt-BR", "pt"]), ["pt-br"]);
+        assert_eq!(region_locales(&["en_US", "en-US", "en", "en_GB"]), ["en-us"]);
+        assert_eq!(region_locales(&["sr_Cyrl", "sr-Cyrl"]), ["sr-cyrl", "sr"]);
+        assert_eq!(region_locales(&["nl"]), ["nl"]);
         assert_eq!(region_locales(&["sr_Latn", "sr-Latn"]), ["sr-latn"]);
         assert!(region_locales(&[]).is_empty());
         assert_eq!(locales_for(&["es_419", "es"]), ["es-419", "es"]);

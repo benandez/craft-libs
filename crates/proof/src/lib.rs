@@ -839,7 +839,7 @@ pub(crate) fn is_address(token: &str) -> bool {
 /// The spelling mark's message in `lang`: a built-in language's own, a pack language's when we
 /// have it (German, Bulgarian and other common ones), else English.
 fn spelling_message(lang: ProofLang) -> &'static str {
-    if let Some(l) = language(lang) {
+    if let Some(l) = language(lang.built_in()) {
         return l.message;
     }
     let pack = lang.pack_locale();
@@ -938,7 +938,8 @@ fn grammar_in(text: &str, lang: ProofLang, capital_first: bool) -> Vec<Issue> {
     match lang {
         ProofLang::En => grammar_en(text, capital_first),
         ProofLang::EnGb | ProofLang::EnCa => grammar_en(text, capital_first).into_iter().map(|i| Issue { lang, ..i }).collect(),
-        _ => language(lang).map_or_else(Vec::new, |l| (l.grammar)(text, lang, capital_first)),
+        // `pt-pt` shares Portuguese's rules, its issues in its own language.
+        _ => language(lang.built_in()).map_or_else(Vec::new, |l| (l.grammar)(text, lang, capital_first).into_iter().map(|i| Issue { lang, ..i }).collect()),
     }
 }
 
@@ -1669,6 +1670,103 @@ mod tests {
         let text = "שלום שלוםם";
         let issues = check_text(text, &[(0..text.len(), he)]);
         assert_eq!(issues.iter().map(|i| &text[i.start..i.end]).collect::<Vec<_>>(), ["שלוםם"], "{issues:?}");
+        packs::set_packs_dir(None);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The `.dic` file `lang`'s spelling is read from with the installed packs and `system` as the
+    /// system's only dictionary folder.
+    fn chosen_dictionary(lang: ProofLang, system: &std::path::Path) -> Option<std::path::PathBuf> {
+        let names: Vec<String> = match lang.spelling_locale() {
+            Some(l) => pack_lang::names(l),
+            None => language(lang).map(|l| l.slot.names().iter().map(|n| (*n).to_string()).collect()).unwrap_or_default(),
+        };
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (region, other) = packs::spelling_dirs(&refs);
+        hunspell::ordered(&refs, &[], &region, &[system.to_path_buf()], &other).into_iter().next().map(|(_, dic)| dic)
+    }
+
+    /// Second review of #485: the bare `es` and `de` packs are Spain's and Germany's, a region's
+    /// text reads its own country's pack, and the system's dictionary of the right region beats
+    /// another region's pack.
+    #[test]
+    fn regional_text_reads_its_own_regions_pack() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let root = std::env::temp_dir().join(format!("wc-proof-region-packs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (packs_dir, system) = (root.join("packs"), root.join("system"));
+        std::fs::create_dir_all(&system).unwrap();
+        let sys = |name: &str| {
+            std::fs::write(system.join(format!("{name}.aff")), "SET UTF-8\n").unwrap();
+            std::fs::write(system.join(format!("{name}.dic")), "1\nx\n").unwrap();
+            system.join(format!("{name}.dic"))
+        };
+        let pack = |locale: &str| write_pack(&packs_dir, locale, &[("spelling.aff", b"SET UTF-8\n"), ("spelling.dic", b"1\nx\n")]).join("spelling.dic");
+        let tag = |t: &str| ProofLang::from_tag(Some(t));
+        packs::set_packs_dir(Some(packs_dir.clone()));
+
+        // es + es-ar + es-mx: each country follows its own list; the bare pack is Spain's.
+        let (es, es_ar, es_mx) = (pack("es"), pack("es-ar"), pack("es-mx"));
+        packs::reload();
+        assert_eq!(chosen_dictionary(tag("es-UY"), &system), Some(es_ar.clone()), "Uruguay: its own, then Argentina's");
+        assert_eq!(chosen_dictionary(tag("es-CO"), &system), Some(es_mx.clone()), "Latin America: Mexico's before Argentina's");
+        assert_eq!(chosen_dictionary(tag("es-AR"), &system), Some(es_mx.clone()), "es-AR is Latin American Spanish");
+        assert_eq!(chosen_dictionary(tag("es-MX"), &system), Some(es_mx.clone()));
+        assert_eq!(chosen_dictionary(tag("es-ES"), &system), Some(es.clone()));
+        std::fs::remove_dir_all(es_mx.parent().unwrap()).unwrap();
+        packs::reload();
+        for t in ["es-AR", "es-CO", "es-UY"] {
+            assert_eq!(chosen_dictionary(tag(t), &system), Some(es_ar.clone()), "{t}: never Spain's bare pack first");
+        }
+        std::fs::remove_dir_all(&packs_dir).unwrap();
+
+        // de + de-ch, system de_DE: Swiss text reads the de-ch pack; German text the bare one.
+        let sys_de = sys("de_DE");
+        let (de, de_ch) = (pack("de"), pack("de-ch"));
+        packs::reload();
+        assert_eq!(chosen_dictionary(tag("de-CH"), &system), Some(de_ch.clone()));
+        assert_eq!(chosen_dictionary(tag("de-LI"), &system), Some(de_ch.clone()));
+        assert_eq!(chosen_dictionary(tag("de-DE"), &system), Some(de.clone()), "the bare pack is Germany's: before the system's de_DE");
+        std::fs::remove_dir_all(de.parent().unwrap()).unwrap();
+        packs::reload();
+        assert_eq!(chosen_dictionary(tag("de-AT"), &system), Some(sys_de), "never the Swiss pack");
+        std::fs::remove_dir_all(&packs_dir).unwrap();
+
+        // pt-br + pt-pt, or system pt_BR: European text reads the pt-pt pack.
+        let (pt_br, pt_pt) = (pack("pt-br"), pack("pt-pt"));
+        packs::reload();
+        assert_eq!(chosen_dictionary(tag("pt-PT"), &system), Some(pt_pt.clone()));
+        assert_eq!(chosen_dictionary(tag("pt-BR"), &system), Some(pt_br.clone()));
+        std::fs::remove_dir_all(pt_br.parent().unwrap()).unwrap();
+        let sys_pt_br = sys("pt_BR");
+        packs::reload();
+        assert_eq!(chosen_dictionary(tag("pt-PT"), &system), Some(pt_pt.clone()));
+        assert_eq!(chosen_dictionary(tag("pt-BR"), &system), Some(sys_pt_br), "another region's pack after the system's right region");
+        std::fs::remove_dir_all(&packs_dir).unwrap();
+
+        // fr pack + system fr_CA: the system's exact region beats another region's pack.
+        let sys_fr_ca = sys("fr_CA");
+        let fr = pack("fr");
+        packs::reload();
+        assert_eq!(chosen_dictionary(tag("fr-CA"), &system), Some(sys_fr_ca));
+        assert_eq!(chosen_dictionary(tag("fr-FR"), &system), Some(fr.clone()));
+        assert_eq!(chosen_dictionary(tag("fr"), &system), Some(fr));
+
+        // Swiss text spells from its pack, hyphenates as German and reads German messages.
+        std::fs::remove_dir_all(&packs_dir).unwrap();
+        write_pack(&packs_dir, "de", &[("spelling.aff", b"SET UTF-8\n"), ("spelling.dic", "1\nStraße\n".as_bytes())]);
+        write_pack(&packs_dir, "de-ch", &[("spelling.aff", b"SET UTF-8\n"), ("spelling.dic", "1\nStrasse\n".as_bytes())]);
+        packs::reload();
+        let (ch, de) = (tag("de-CH"), tag("de-DE"));
+        assert!(is_correct_in("Strasse", ch) && !is_correct_in("Straße", ch));
+        assert!(is_correct_in("Straße", de) && !is_correct_in("Strasse", de));
+        assert_eq!(
+            hyphen::hyphenate_word_in("Silbentrennung", &hyphen::Limits::default(), ch),
+            hyphen::hyphenate_word_in("Silbentrennung", &hyphen::Limits::default(), de)
+        );
+        assert_eq!(spelling_message(ch), "Möglicher Rechtschreibfehler");
         packs::set_packs_dir(None);
         set_dictionaries_folder(Some(shared_test_folder()));
         let _ = std::fs::remove_dir_all(&root);
