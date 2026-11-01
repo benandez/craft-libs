@@ -8,7 +8,8 @@
 //!
 //! Search order: the folder set with [`set_dictionary_dir`], the directory in
 //! `WORDCRAFT_DICTIONARIES`, WordCraft's own `dictionaries` folder under the user's application
-//! data (on every desktop system), then the usual system locations. On the web there are none.
+//! data (on every desktop system), then an installed Language pack ([`crate::packs`]), then the
+//! usual system locations. On the web there are only the first and the packs.
 
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -16,7 +17,7 @@ use std::sync::RwLock;
 use crate::affix::AffixDict;
 
 /// Largest `.aff` or `.dic` file read (real ones are a few MB).
-const MAX_FILE: u64 = 64 << 20;
+pub(crate) const MAX_FILE: u64 = 64 << 20;
 
 /// An extra directory searched first (a setting), set by the front end.
 static EXTRA_DIR: RwLock<Option<PathBuf>> = RwLock::new(None);
@@ -67,12 +68,23 @@ fn lo_ext_dirs(name: &str) -> Vec<String> {
 /// Directories that may hold Hunspell dictionaries, most specific first. `lo_exts`, when a
 /// language is being searched for, adds LibreOffice's extension folders for it (`dict-pt-BR`).
 pub fn search_dirs(lo_exts: Option<&[String]>) -> Vec<PathBuf> {
+    let (mut dirs, system) = search_tiers(lo_exts);
+    dirs.extend(system);
+    dirs
+}
+
+/// [`search_dirs`] in two tiers: the dictionaries folders (the one set with
+/// [`set_dictionary_dir`], `WORDCRAFT_DICTIONARIES` and WordCraft's own folder under the user's
+/// application data), then the system's Hunspell and LibreOffice folders. Installed Language
+/// packs ([`crate::packs`]) are searched between the two.
+fn search_tiers(lo_exts: Option<&[String]>) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut system: Vec<PathBuf> = Vec::new();
     if let Some(d) = EXTRA_DIR.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
         dirs.push(d);
     }
     if cfg!(target_arch = "wasm32") {
-        return dirs;
+        return (dirs, system);
     }
     if let Some(d) = std::env::var_os("WORDCRAFT_DICTIONARIES").filter(|v| !v.is_empty()) {
         dirs.push(PathBuf::from(d));
@@ -85,12 +97,12 @@ pub fn search_dirs(lo_exts: Option<&[String]>) -> Vec<PathBuf> {
         for var in ["LOCALAPPDATA", "APPDATA"] {
             if let Some(base) = std::env::var_os(var).filter(|v| !v.is_empty()).map(PathBuf::from) {
                 dirs.push(base.join("WordCraft").join("dictionaries"));
-                dirs.push(base.join("hunspell"));
+                system.push(base.join("hunspell"));
             }
         }
         for var in ["ProgramFiles", "ProgramFiles(x86)"] {
             if let Some(base) = std::env::var_os(var).filter(|v| !v.is_empty()).map(PathBuf::from) {
-                dirs.extend(lo_dirs(&base.join("LibreOffice").join("share").join("extensions").to_string_lossy()));
+                system.extend(lo_dirs(&base.join("LibreOffice").join("share").join("extensions").to_string_lossy()));
             }
         }
         // If LibreOffice is installed on another drive (e.g. D:\Program Files\LibreOffice), check drives C..Z
@@ -99,7 +111,7 @@ pub fn search_dirs(lo_exts: Option<&[String]>) -> Vec<PathBuf> {
             for pf in ["Program Files", "Program Files (x86)"] {
                 let lo_base = PathBuf::from(format!(r"{drive_char}:\{pf}\LibreOffice\share\extensions"));
                 if lo_base.is_dir() {
-                    dirs.extend(lo_dirs(&lo_base.to_string_lossy()));
+                    system.extend(lo_dirs(&lo_base.to_string_lossy()));
                 }
             }
         }
@@ -108,28 +120,28 @@ pub fn search_dirs(lo_exts: Option<&[String]>) -> Vec<PathBuf> {
             // An app started from Finder or the Dock doesn't see `WORDCRAFT_DICTIONARIES`; this
             // folder needs no setting (#1063).
             dirs.push(h.join("Library/Application Support/WordCraft/dictionaries"));
-            dirs.push(h.join("Library/Spelling"));
+            system.push(h.join("Library/Spelling"));
         }
-        dirs.push(PathBuf::from("/Library/Spelling"));
-        dirs.push(PathBuf::from("/opt/homebrew/share/hunspell"));
-        dirs.push(PathBuf::from("/usr/local/share/hunspell"));
-        dirs.extend(lo_dirs("/Applications/LibreOffice.app/Contents/Resources/extensions"));
+        system.push(PathBuf::from("/Library/Spelling"));
+        system.push(PathBuf::from("/opt/homebrew/share/hunspell"));
+        system.push(PathBuf::from("/usr/local/share/hunspell"));
+        system.extend(lo_dirs("/Applications/LibreOffice.app/Contents/Resources/extensions"));
     } else {
         // Nor does one started from a desktop launcher (#1063).
         if let Some(data) = xdg_data_home(std::env::var_os("XDG_DATA_HOME"), home.as_deref()) {
             dirs.push(data.join("wordcraft").join("dictionaries"));
         }
         if let Some(h) = &home {
-            dirs.push(h.join(".local/share/hunspell"));
+            system.push(h.join(".local/share/hunspell"));
         }
         for d in ["/usr/share/hunspell", "/usr/share/myspell", "/usr/share/myspell/dicts", "/usr/local/share/hunspell", "/usr/local/share/myspell"] {
-            dirs.push(PathBuf::from(d));
+            system.push(PathBuf::from(d));
         }
         for d in ["/usr/lib/libreoffice/share/extensions", "/opt/libreoffice/share/extensions"] {
-            dirs.extend(lo_dirs(d));
+            system.extend(lo_dirs(d));
         }
     }
-    dirs
+    (dirs, system)
 }
 
 /// The user's data folder on Linux and the BSDs: `$XDG_DATA_HOME` when it is an absolute path (the
@@ -140,9 +152,16 @@ fn xdg_data_home(xdg: Option<std::ffi::OsString>, home: Option<&Path>) -> Option
 
 /// The first `<name>.aff`/`<name>.dic` pair found for any of `names` (`pl_PL`, `pl`), searching
 /// [`search_dirs`] (including LibreOffice's extension folder for the first name).
+///
+/// Lookup order: the dictionaries folders, then an installed Language pack for one of `names`
+/// (its `spelling.aff`/`spelling.dic`, [`crate::packs`]), then the system's folders.
 pub fn find(names: &[&str]) -> Option<(PathBuf, PathBuf)> {
     let lo = names.first().copied().map(lo_ext_dirs);
-    search_dirs(lo.as_deref()).into_iter().find_map(|dir| find_in(&dir, names))
+    let (dirs, system) = search_tiers(lo.as_deref());
+    dirs.iter()
+        .find_map(|dir| find_in(dir, names))
+        .or_else(|| crate::packs::spelling_dirs(names).iter().find_map(|dir| find_in(dir, &[crate::packs::SPELLING])))
+        .or_else(|| system.iter().find_map(|dir| find_in(dir, names)))
 }
 
 /// Every `<name>.aff`/`<name>.dic` pair for `names`, name by name, each in every folder

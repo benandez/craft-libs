@@ -76,6 +76,7 @@ pub mod hyphen;
 pub mod id;
 pub mod it;
 pub mod lang;
+pub mod packs;
 pub mod patterns;
 pub mod pl;
 pub mod pt;
@@ -303,6 +304,12 @@ fn language(lang: ProofLang) -> Option<&'static Language> {
 /// the new search path, and text is checked again.
 pub fn set_dictionaries_folder(dir: Option<std::path::PathBuf>) {
     hunspell::set_dictionary_dir(dir);
+    reload_dictionaries();
+}
+
+/// Forget every loaded dictionary, so the next check looks for them again (the dictionaries
+/// folder or the installed Language packs changed), and check text again.
+pub(crate) fn reload_dictionaries() {
     for l in &LANGUAGES {
         l.slot.reload();
     }
@@ -336,8 +343,8 @@ pub fn english_source(lang: ProofLang) -> Option<EnglishSource> {
     lang.is_english().then(|| english::source(lang))
 }
 
-/// A number that changes whenever a word is added to or removed from the user dictionary, or the
-/// dictionaries folder changes.
+/// A number that changes whenever a word is added to or removed from the user dictionary, the
+/// dictionaries folder changes, or the Language packs do ([`packs::set_packs_dir`]).
 pub fn dictionary_generation() -> u64 {
     DICTIONARY_GENERATION.load(Ordering::Relaxed)
 }
@@ -1310,6 +1317,163 @@ mod tests {
         assert!(is_correct_in("chrząszcz", ProofLang::Pl) && !is_correct_in("chrzonszcz", ProofLang::Pl));
         assert!(is_correct_in("tenés", ProofLang::EsUy) && !is_correct_in("prueva", ProofLang::EsUy));
         assert!(is_correct_in("дом", ProofLang::Ru) && !is_correct_in("дум", ProofLang::Ru));
+    }
+
+    /// The test dictionaries' folder the dictionaries-folder tests leave set (see
+    /// [`dictionaries_folder_is_searched_first`]).
+    fn shared_test_folder() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("wc-proof-dictionaries-{}", std::process::id()));
+        write_test_dictionaries(&dir);
+        dir
+    }
+
+    /// Write a Language pack folder `<packs>/<locale>/` as the font store unpacks one.
+    fn write_pack(packs: &std::path::Path, locale: &str, files: &[(&str, &[u8])]) -> std::path::PathBuf {
+        let dir = packs.join(locale);
+        std::fs::create_dir_all(dir.join("LICENCES")).unwrap();
+        std::fs::write(dir.join("pack.toml"), format!("locale = \"{locale}\"\nname = \"Hrvatski (test)\"\nlicence = \"MIT\"\nclass = \"Embeddable\"\nsources = [\"https://example.org/{locale}\"]\n")).unwrap();
+        std::fs::write(dir.join("LICENCES").join("COPYING"), "Test licence text.").unwrap();
+        for (name, bytes) in files {
+            std::fs::write(dir.join(name), bytes).unwrap();
+        }
+        dir
+    }
+
+    /// CP4.2: an installed Language pack's spelling dictionary and hyphenation patterns are used
+    /// (after the dictionaries folder, before the system's), without a restart; removing it turns
+    /// them off again; English is unaffected. Croatian stands in for every pack language: its
+    /// dictionary leaves the dictionaries folder while the pack holds the same test words (plus
+    /// one), so Croatian tests running meanwhile see the same words.
+    #[test]
+    fn an_installed_pack_is_used_and_a_removed_one_is_not() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = std::env::temp_dir().join(format!("wc-proof-packs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (folder, packs) = (root.join("dictionaries"), root.join("language-packs"));
+        write_test_dictionaries(&folder);
+        std::fs::remove_file(folder.join("hr_HR.aff")).unwrap();
+        std::fs::remove_file(folder.join("hr_HR.dic")).unwrap();
+        let hyphen_before = hyphen::hyphenate_word_in("hyphenation", &hyphen::Limits::default(), ProofLang::Hr);
+        let english_before = (
+            english_source(ProofLang::En),
+            is_correct_in("becuase", ProofLang::En),
+            hyphen::hyphenate_word("hyphenation", &hyphen::Limits::default()),
+        );
+        let dic = format!("{}zzpaket\n", hr::test_dict::DIC);
+        let pack = write_pack(
+            &packs,
+            "hr",
+            &[
+                ("spelling.aff", hr::test_dict::AFF.as_bytes()),
+                ("spelling.dic", dic.as_bytes()),
+                // Liang's example patterns: `hy-phen-ation`.
+                ("hyphenation.pat", b"% test patterns\nhy3ph he2n hena4 hen5at 1na n2at 1tio 2io o2n\n"),
+            ],
+        );
+        // The pack first, so Croatian always has its test words.
+        let before = dictionary_generation();
+        packs::set_packs_dir(Some(packs.clone()));
+        assert!(dictionary_generation() > before, "cached checks are dropped");
+        set_dictionaries_folder(Some(folder.clone()));
+        assert_eq!(packs::packs_dir(), Some(packs.clone()));
+        let installed = packs::installed();
+        assert_eq!(installed.len(), 1);
+        assert_eq!(
+            installed[0],
+            packs::InstalledPack { locale: "hr".into(), name: "Hrvatski (test)".into(), licence: "MIT".into(), path: pack.clone() }
+        );
+        assert!(packs::load_errors().is_empty(), "{:?}", packs::load_errors());
+        assert!(is_correct_in("zzpaket", ProofLang::Hr) && is_correct_in("kuća", ProofLang::Hr), "the pack's dictionary");
+        assert!(!is_correct_in("zzpaketx", ProofLang::Hr));
+        let found = installed_dictionaries();
+        assert!(found.iter().any(|(l, p)| *l == ProofLang::Hr && p.as_ref() == Some(&pack.join("spelling.dic"))), "{found:?}");
+        assert_eq!(hyphen::hyphenate_word_in("hyphenation", &hyphen::Limits::default(), ProofLang::Hr), "hy-phen-ation");
+        let licences = packs::licence_texts();
+        assert!(licences.iter().any(|(t, x)| t == "Hrvatski (test) (hr): COPYING" && x == "Test licence text."), "{licences:?}");
+        assert!(licences.iter().any(|(t, _)| t.contains("English")), "the embedded notices come first");
+        // The dictionaries folder still comes first.
+        std::fs::write(folder.join("hr_HR.aff"), hr::test_dict::AFF).unwrap();
+        std::fs::write(folder.join("hr_HR.dic"), hr::test_dict::DIC).unwrap();
+        packs::reload();
+        assert!(!is_correct_in("zzpaket", ProofLang::Hr) && is_correct_in("kuća", ProofLang::Hr), "the folder's dictionary");
+        assert_eq!(hyphen::hyphenate_word_in("hyphenation", &hyphen::Limits::default(), ProofLang::Hr), "hy-phen-ation", "hyphenation is the pack's");
+        // Removed: the pack is no longer read.
+        std::fs::remove_dir_all(&pack).unwrap();
+        packs::reload();
+        assert!(packs::installed().is_empty());
+        assert!(!is_correct_in("zzpaket", ProofLang::Hr) && is_correct_in("kuća", ProofLang::Hr));
+        assert_eq!(hyphen::hyphenate_word_in("hyphenation", &hyphen::Limits::default(), ProofLang::Hr), hyphen_before);
+        let english_after = (
+            english_source(ProofLang::En),
+            is_correct_in("becuase", ProofLang::En),
+            hyphen::hyphenate_word("hyphenation", &hyphen::Limits::default()),
+        );
+        assert_eq!(english_after, english_before, "English is unaffected");
+        packs::set_packs_dir(None);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// CP4.2, hostile packs: a missing or broken `pack.toml`, a path outside the pack, a folder
+    /// that isn't a language tag, a symbolic link, patterns that aren't UTF-8 or a dictionary that
+    /// can't be read are reported, never a panic, and the pack (or that file) is skipped.
+    #[test]
+    fn corrupt_packs_are_reported_and_skipped() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = std::env::temp_dir().join(format!("wc-proof-bad-packs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // Good spelling (the test words, so Croatian tests running meanwhile are unaffected), bad
+        // patterns.
+        write_pack(
+            &root,
+            "hr",
+            &[("spelling.aff", hr::test_dict::AFF.as_bytes()), ("spelling.dic", hr::test_dict::DIC.as_bytes()), ("hyphenation.pat", b"\xff\xfe a1b")],
+        );
+        let traversal = write_pack(&root, "nl", &[("spelling.aff", b"SET UTF-8\n"), ("spelling.dic", b"1\nhuis\n")]);
+        std::fs::write(traversal.join("pack.toml"), "locale = \"nl\"\nlicence = \"MIT\"\n[[file]]\npath = \"../../../etc/passwd\"\n").unwrap();
+        let wrong = write_pack(&root, "fr", &[]);
+        std::fs::write(wrong.join("pack.toml"), "locale = \"de\"\nlicence = \"MIT\"\n").unwrap();
+        let broken = write_pack(&root, "sk", &[]);
+        std::fs::write(broken.join("pack.toml"), "locale = \"sk\n").unwrap();
+        std::fs::create_dir_all(root.join("ca")).unwrap();
+        std::fs::create_dir_all(root.join("Bad_Name")).unwrap();
+        std::fs::create_dir_all(root.join(".tmp-el-1")).unwrap();
+        let huge = write_pack(&root, "lt", &[]);
+        std::fs::write(huge.join("pack.toml"), vec![b'#'; 2 << 20]).unwrap();
+        #[cfg(unix)]
+        {
+            let linked = write_pack(&root, "sl", &[("hyphenation.pat", b"a1b")]);
+            std::fs::remove_file(linked.join("hyphenation.pat")).unwrap();
+            std::os::unix::fs::symlink("/etc/passwd", linked.join("hyphenation.pat")).unwrap();
+            std::os::unix::fs::symlink(&linked, root.join("sv")).unwrap();
+        }
+        packs::set_packs_dir(Some(root.clone()));
+        let locales: Vec<String> = packs::installed().into_iter().map(|p| p.locale).collect();
+        assert_eq!(locales, if cfg!(unix) { vec!["hr", "sl"] } else { vec!["hr"] });
+        let _ = hyphen::hyphenate_word_in("hyphenation", &hyphen::Limits::default(), ProofLang::Hr);
+        let errors = packs::load_errors();
+        let reason = |l: &str| errors.iter().find(|(k, _)| k == l).map(|(_, e)| e.clone()).unwrap_or_default();
+        assert!(reason("nl").contains("outside the pack"), "{errors:?}");
+        assert!(reason("fr").contains("names locale"), "{errors:?}");
+        assert!(reason("sk").starts_with("pack.toml"), "{errors:?}");
+        assert!(reason("ca").contains("no pack.toml"), "{errors:?}");
+        assert!(reason("Bad_Name").contains("language tag"), "{errors:?}");
+        assert!(reason("lt").contains("too large"), "{errors:?}");
+        assert!(reason("hr").contains("not UTF-8"), "{errors:?}");
+        assert!(!errors.iter().any(|(k, _)| k.starts_with('.')), "temporary folders are not packs");
+        #[cfg(unix)]
+        {
+            assert!(reason("sv").contains("not a folder"), "{errors:?}");
+            assert!(hunspell::find(&["sl"]).is_none_or(|(_, d)| !d.starts_with(&root)), "a link is never read");
+        }
+        assert!(is_correct_in("kuća", ProofLang::Hr), "the pack's spelling still works");
+        // A dictionary in a pack that can't be read is reported like any other.
+        let bad = write_pack(&root, "hr", &[("spelling.aff", b"SET SHIFT_JIS\n"), ("spelling.dic", b"1\nkuca\n")]);
+        let (aff, dic) = hunspell::find_in(&bad, &["spelling"]).unwrap();
+        assert!(hunspell::load(&aff, &dic).unwrap_err().contains("unsupported encoding"));
+        packs::set_packs_dir(None);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A dictionary that fails to load says why in File › Options › Proofing in every language
