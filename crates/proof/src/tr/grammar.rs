@@ -180,12 +180,20 @@ pub fn check_with(text: &str, capital_first: bool) -> Vec<Issue> {
                 && chars.get(i - 2).is_some_and(|&(_, b)| b.is_ascii_digit())
                 && after == Some(' ')
                 && chars.get(i + 2).is_some_and(|&(_, d)| d.is_ascii_digit());
+            // `:)`, `;(`, `:-)` are emoticons; `:D` and `;P` only when a space or the end follows
+            // (`;Dün` is a stray space before a word).
+            let ends = |k: usize| chars.get(k).is_none_or(|&(_, e)| e.is_whitespace());
+            let emoticon = match after {
+                Some(')' | '(') => true,
+                Some('-') => matches!(chars.get(i + 2), Some(&(_, ')' | '('))),
+                Some('D' | 'P') => ends(i + 2),
+                _ => false,
+            };
             let flag = !ratio
                 && match c {
-                    ',' => true,
-                    ';' => !matches!(after, Some(')' | '(' | '-' | 'P' | 'D')),
-                    '.' => !matches!(after, Some('.')) && !after.is_some_and(|a| a.is_ascii_digit()),
-                    _ => after.is_none_or(|a| a.is_whitespace() || matches!(a, '"' | '”' | '’' | '!' | '?')),
+                    ',' | '!' | '?' => true,
+                    ':' | ';' => !emoticon,
+                    _ => !matches!(after, Some('.')) && !after.is_some_and(|a| a.is_ascii_digit()),
                 };
             if flag {
                 v.push(Issue {
@@ -347,6 +355,10 @@ mod tests {
             assert!(check(ok).is_empty(), "{ok}: {:?}", check(ok));
         }
         assert_eq!(check("Gel , bak.").len(), 1, "a real stray space is still flagged");
+        for bad in ["Not :bu", "Ne ?Bu", "Peki ;Dün", "Evet !"] {
+            assert!(check(bad).iter().any(|i| i.message.starts_with("Noktalama")), "{bad}: {:?}", check(bad));
+        }
+        assert!(check("Harika :-) dedi.").is_empty() && check("Peki ;P").is_empty());
         assert_eq!(check("Geldi. bu iyi.").len(), 1, "a real sentence start is still flagged");
     }
 
