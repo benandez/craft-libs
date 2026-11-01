@@ -334,34 +334,36 @@ pub struct AffixDict {
 #[derive(Clone, Debug, Default)]
 struct Conv {
     pairs: Vec<(String, String)>,
-    /// First character of `from` → indices into `pairs`, longest `from` first (of equal ones, the
-    /// later pair first: it is the one that wins).
-    by_first: FxMap<char, Vec<u32>>,
+    /// `from` → index into `pairs` (of equal ones, the later pair: it is the one that wins).
+    by_from: FxMap<String, u32>,
+    /// Longest `from`, in bytes.
+    longest: usize,
 }
 
 impl Conv {
     /// The table of `pairs` (checked by [`Rules::push_conv`]: non-empty `from`, bounded sizes).
     fn new(pairs: Vec<(String, String)>) -> Conv {
-        let mut by_first: FxMap<char, Vec<u32>> = FxMap::default();
+        let mut by_from: FxMap<String, u32> = FxMap::default();
         for (i, (from, _)) in pairs.iter().enumerate() {
-            if let (Some(c), Ok(i)) = (from.chars().next(), u32::try_from(i)) {
-                by_first.entry(c).or_default().push(i);
+            if let Ok(i) = u32::try_from(i) {
+                by_from.insert(from.clone(), i);
             }
         }
-        for list in by_first.values_mut() {
-            list.sort_by_key(|&i| (std::cmp::Reverse(pairs.get(i as usize).map_or(0, |p| p.0.len())), std::cmp::Reverse(i)));
-        }
-        Conv { pairs, by_first }
+        let longest = pairs.iter().map(|p| p.0.len()).max().unwrap_or(0);
+        Conv { pairs, by_from, longest }
     }
 
     fn is_empty(&self) -> bool {
         self.pairs.is_empty()
     }
 
-    /// The pair to apply at the start of `rest`: the longest `from` that starts it.
+    /// The pair to apply at the start of `rest`: the longest `from` that starts it. One hash
+    /// lookup per prefix of `rest` up to the longest `from` ([`MAX_CONV_BYTES`]), however many
+    /// pairs there are (craft-libs#489 review: 65,536 pairs on one first character).
     fn at(&self, rest: &str) -> Option<&(String, String)> {
-        let c = rest.chars().next()?;
-        self.by_first.get(&c)?.iter().filter_map(|&i| self.pairs.get(i as usize)).find(|(from, _)| rest.starts_with(from.as_str()))
+        let ends = rest.char_indices().map(|(i, _)| i).skip(1).chain(std::iter::once(rest.len()));
+        let ends: Vec<usize> = ends.take_while(|&e| e <= self.longest).collect();
+        ends.iter().rev().find_map(|&e| self.by_from.get(rest.get(..e)?)).and_then(|&i| self.pairs.get(i as usize))
     }
 
     /// `w` converted: at each position the longest matching `from` is replaced by its `to`, and
