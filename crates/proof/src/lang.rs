@@ -193,18 +193,31 @@ impl ProofLang {
         }
     }
 
+    /// The locale whose Hunspell dictionary (dictionaries folder, Language pack, system) spells
+    /// this language through the shared affix engine: a [`ProofLang::Pack`] language's own, and
+    /// German's and Bulgarian's, which have hyphenation (and Bulgarian rules) of their own but no
+    /// dictionary slot. `None` for the languages with a slot of their own, English and `Other`.
+    pub(crate) fn spelling_locale(self) -> Option<PackLocale> {
+        match self {
+            ProofLang::Pack(l) => Some(l),
+            ProofLang::De => PackLocale::new("de-DE"),
+            ProofLang::Bg => PackLocale::new("bg-BG"),
+            _ => None,
+        }
+    }
+
     /// The locale of a [`ProofLang::Pack`] language.
     pub fn pack_locale(self) -> Option<PackLocale> {
         if let ProofLang::Pack(l) = self { Some(l) } else { None }
     }
 
-    /// Does WordCraft check spelling in this language? For a [`ProofLang::Pack`] language: is a
-    /// dictionary for it available now (read on first use, cached until the dictionaries folder or
+    /// Does WordCraft check spelling in this language? For a [`ProofLang::Pack`] language, German
+    /// and Bulgarian: is a dictionary for it available now (read on first use, cached until the dictionaries folder or
     /// the packs change)?
     pub fn is_proofed(self) -> bool {
-        match self {
-            ProofLang::Pack(l) => crate::pack_lang::has_dictionary(l),
-            _ => Self::PROOFED.contains(&self),
+        match self.spelling_locale() {
+            Some(l) => crate::pack_lang::has_dictionary(l),
+            None => Self::PROOFED.contains(&self),
         }
     }
 }

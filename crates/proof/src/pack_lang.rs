@@ -144,7 +144,7 @@ pub(crate) fn is_correct(word: &str, locale: PackLocale, opts: &crate::Options) 
     if d.is_empty() {
         return true;
     }
-    let Some(w) = crate::spelling::word_to_check(&d, word, opts) else { return true };
+    let Some(w) = crate::spelling::word_to_check_in(&d, word, opts) else { return true };
     let known = |w: &str| d.check(w) || crate::in_user_dictionary(&w.to_lowercase());
     if w.contains('-') && !known(w) {
         return w.split('-').all(|p| p.chars().count() <= 1 || known(p));

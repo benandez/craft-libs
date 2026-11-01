@@ -322,11 +322,11 @@ pub(crate) fn reload_dictionaries() {
     DICTIONARY_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
-/// The `.dic` file a [`ProofLang::Pack`] language's spelling is read from now (the dictionaries
+/// The `.dic` file a [`ProofLang::Pack`] language's (or German's or Bulgarian's) spelling is read from now (the dictionaries
 /// folder, an installed Language pack or the system's); `None` when it has none (unchecked) or
 /// `lang` isn't a pack language. Reads the dictionary once (it is cached afterwards).
 pub fn pack_dictionary_file(lang: ProofLang) -> Option<std::path::PathBuf> {
-    pack_lang::dictionary_file(lang.pack_locale()?)
+    pack_lang::dictionary_file(lang.spelling_locale()?)
 }
 
 /// Each language that reads an installed Hunspell dictionary, with the `.dic` file found for it
@@ -343,7 +343,7 @@ pub fn dictionary_load_error(lang: ProofLang) -> Option<String> {
     if matches!(lang, ProofLang::En | ProofLang::EnGb | ProofLang::EnCa) {
         return english::load_error(lang);
     }
-    if let ProofLang::Pack(l) = lang {
+    if let Some(l) = lang.spelling_locale() {
         return pack_lang::load_error(l);
     }
     hunspell::load_error(language(lang)?.slot.name()).map(|(_, reason)| reason)
@@ -842,7 +842,7 @@ pub fn is_correct_in_with(word: &str, lang: ProofLang, opts: &Options) -> bool {
     if lang.is_english() {
         return is_correct_english(word, lang, opts);
     }
-    if let ProofLang::Pack(l) = lang {
+    if let Some(l) = lang.spelling_locale() {
         return accepted_by_options(word, opts) || pack_lang::is_correct(word, l, opts);
     }
     // A language WordCraft doesn't proof (Bulgarian, German, any other) has no spelling marks.
@@ -856,7 +856,7 @@ pub fn suggest_in(word: &str, max: usize, lang: ProofLang) -> Vec<String> {
     if lang.is_english() {
         return suggest_english(word, max, lang);
     }
-    if let ProofLang::Pack(l) = lang {
+    if let Some(l) = lang.spelling_locale() {
         return pack_lang::suggest(word, max, l);
     }
     language(lang).map_or_else(Vec::new, |l| (l.suggest)(word, max, lang))
@@ -1492,6 +1492,37 @@ mod tests {
         assert!(unchecked(nl) || before.2.is_some());
         assert_eq!(check_text(text, &[]), english_before);
         packs::set_packs_dir(None);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Review of #485: German and Bulgarian, which have hyphenation of their own but no
+    /// dictionary slot, are spelled from their Language pack (or a Hunspell dictionary) too.
+    #[test]
+    fn german_and_bulgarian_are_spelled_from_their_packs() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let root = std::env::temp_dir().join(format!("wc-proof-de-bg-packs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let hyphen_before = hyphen::hyphenate_word_in("Silbentrennung", &hyphen::Limits::default(), ProofLang::De);
+        write_pack(&root, "de", &[("spelling.aff", b"SET UTF-8\n"), ("spelling.dic", "2\nHaus\nund\n".as_bytes())]);
+        write_pack(&root, "bg", &[("spelling.aff", b"SET UTF-8\n"), ("spelling.dic", "1\nкъща\n".as_bytes())]);
+        packs::set_packs_dir(Some(root.clone()));
+        let de = ProofLang::from_tag(Some("de-AT"));
+        assert_eq!(de, ProofLang::De);
+        assert!(is_correct_in("Haus", de) && !is_correct_in("Hauz", de));
+        assert!(suggest_in("Hauz", 5, de).contains(&"Haus".to_string()));
+        assert_eq!(check_text("Haus und Hauz", &[(0..13, de)]).len(), 1);
+        assert!(de.is_proofed() && has_dictionary(Some("de-CH")));
+        assert_eq!(pack_dictionary_file(de), Some(root.join("de").join("spelling.dic")));
+        assert!(is_correct_in("къща", ProofLang::Bg) && !is_correct_in("къшта", ProofLang::Bg), "any script, not only Latin");
+        assert_eq!(
+            hyphen::hyphenate_word_in("Silbentrennung", &hyphen::Limits::default(), ProofLang::De),
+            hyphen_before,
+            "German keeps its own hyphenation"
+        );
+        packs::set_packs_dir(None);
+        assert!(is_correct_in("Hauz", de) || pack_dictionary_file(de).is_some(), "no dictionary: unchecked");
         set_dictionaries_folder(Some(shared_test_folder()));
         let _ = std::fs::remove_dir_all(&root);
     }
