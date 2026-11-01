@@ -59,7 +59,7 @@ Tests that pin results of the data run only when every file the build embeds is 
 `src/no_data.rs` runs every public entry point when none is (`craft_proof_no_data`). A partial
 data folder runs neither set.
 
-- Only English (`en-*`) is embedded by default. A **Language build** names the others it embeds
+- Only English (`en-*`) and our own word supplements (`*-extra.txt`, MIT) are embedded by default. A **Language build** names the others it embeds
   with `CRAFT_PROOF_EMBED=de,pl` (or `all`); every other build gets them from a Language pack.
   `craft_proof::packs::embedded_locales()` lists what a build embeds.
 

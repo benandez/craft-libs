@@ -524,6 +524,19 @@ mod tests {
         assert!(parse_pack_toml(&deep).is_err());
     }
 
+    /// Review of #485: our own word supplements (`ru-extra.txt`, MIT) stay embedded in the
+    /// default build; they aren't upstream data and don't make a locale "embedded".
+    #[test]
+    fn our_supplements_are_embedded_by_default() {
+        if cfg!(craft_proof_data) {
+            assert!(!crate::data::EXTRA_RU.is_empty(), "ru-extra.txt is embedded");
+        }
+        let embed = option_env!("CRAFT_PROOF_EMBED").unwrap_or_default();
+        if embed.is_empty() {
+            assert!(!embedded_locales().contains(&"ru"));
+        }
+    }
+
     #[test]
     fn embedded_locales_are_english_unless_a_language_build_names_more() {
         let embed = option_env!("CRAFT_PROOF_EMBED").unwrap_or_default();

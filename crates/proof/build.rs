@@ -24,7 +24,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 /// (constant, path under `language-data/`, bytes rather than text). The first path part is the
-/// locale: `en-*` is always embedded, any other only in a Language build that names it.
+/// locale: `en-*` and our own `*-extra.txt` supplements are always embedded, any other only in a
+/// Language build that names it.
 const FILES: &[(&str, &str, bool)] = &[
     ("EN_US_DIC", "en-us/en-us.dic", true),
     ("EN_US_AFF", "en-us/spelling.aff", false),
@@ -45,14 +46,20 @@ const FILES: &[(&str, &str, bool)] = &[
 ];
 
 /// The locales a Language build embeds besides English: `CRAFT_PROOF_EMBED`, comma-separated
-/// lowercase locales (`de,pl`), or `all`. Unset: English only; the others come from Language packs.
+/// lowercase locales (`de,pl`), or `all`. Unset: English (and our supplements) only; the others come from Language packs.
 fn opted_in() -> Vec<String> {
     std::env::var("CRAFT_PROOF_EMBED").unwrap_or_default().split(',').map(|l| l.trim().to_ascii_lowercase()).filter(|l| !l.is_empty()).collect()
 }
 
-/// Is `locale`'s data embedded in this build?
-fn embeds(locale: &str, opted: &[String]) -> bool {
-    locale.starts_with("en-") || opted.iter().any(|o| o == locale || o == "all")
+/// Our own word supplements (`*-extra.txt`): MIT, tiny, embedded in every build whatever the
+/// locale; only upstream data waits for a Language build or a pack.
+fn is_ours(rel: &str) -> bool {
+    rel.ends_with("-extra.txt")
+}
+
+/// Is the file `rel` (of `locale`) embedded in this build?
+fn embeds(rel: &str, locale: &str, opted: &[String]) -> bool {
+    is_ours(rel) || locale.starts_with("en-") || opted.iter().any(|o| o == locale || o == "all")
 }
 
 fn main() {
@@ -91,7 +98,7 @@ fn main() {
     let mut locales: Vec<String> = Vec::new();
     for &(name, rel, bytes) in FILES {
         let locale = rel.split('/').next().unwrap_or_default();
-        let wanted = embeds(locale, &opted);
+        let wanted = embeds(rel, locale, &opted);
         wanted_files += usize::from(wanted);
         let file = dir.as_ref().filter(|_| wanted).map(|d| d.join(rel)).filter(|f| f.is_file());
         if let (Some(d), None, true) = (&dir, &file, wanted) {
@@ -106,7 +113,8 @@ fn main() {
                 if !locale.starts_with("en-") {
                     println!("cargo::rustc-cfg=craft_proof_embed=\"{locale}\"");
                 }
-                if !locales.iter().any(|l| l == locale) {
+                // The locales whose upstream data is embedded (our supplements don't count).
+                if !is_ours(rel) && !locales.iter().any(|l| l == locale) {
                     locales.push(locale.to_string());
                 }
                 // `{:?}` escapes the path (Windows backslashes) as a Rust string literal.
