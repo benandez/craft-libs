@@ -1429,7 +1429,9 @@ impl AffixDict {
         {
             return false;
         }
-        let excluded = excluded.and(self.forbidden);
+        // FORBIDDENWORD and NEEDAFFIX stems are no compound part (Hunspell rejects a compound
+        // with a NEEDAFFIX part), checked here so the `excluded` slots can't run out.
+        let bare = |set: &[u16]| [self.forbidden, self.need_affix].into_iter().flatten().all(|f| !has(set, f));
         // Char boundaries of `w`, `0` and `w.len()` included.
         let cuts: Vec<usize> = w.char_indices().map(|(i, _)| i).chain(std::iter::once(w.len())).collect();
         let n = cuts.len();
@@ -1445,7 +1447,7 @@ impl AffixDict {
             let slot = parts.get_mut(a * n + b)?;
             *slot.get_or_insert_with(|| {
                 let (Some(&x), Some(&y)) = (cuts.get(a), cuts.get(b)) else { return None };
-                w.get(x..y).and_then(|p| self.stem_set(p)).filter(|set| !excluded.hits(set))
+                w.get(x..y).and_then(|p| self.stem_set(p)).filter(|set| !excluded.hits(set) && bare(set))
             })
         };
         self.compound_rules.iter().any(|rule| compound_matches(rule, &mut part, n))
@@ -2511,6 +2513,13 @@ pub(crate) mod tests {
         for bad in ["FLAG long\nCOMPOUNDRULE nn*", "FLAG long\nCOMPOUNDRULE (n)", "FLAG num\nCOMPOUNDRULE (1", "FLAG num\nCOMPOUNDRULE (x)"] {
             assert!(AffixDict::from_hunspell(&format!("SET UTF-8\n{bad}\n"), "1\nx\n", &[]).is_err(), "{bad}");
         }
+    }
+
+    /// A NEEDAFFIX stem is no part of a `COMPOUNDRULE` compound (as the `hunspell` CLI answers).
+    #[test]
+    fn needaffix_stems_are_no_compound_part() {
+        let d = AffixDict::from_hunspell("SET UTF-8\nNEEDAFFIX N\nCOMPOUNDRULE 1\nCOMPOUNDRULE ab\n", "2\nfoo/a\nbar/bN\n", &[]).unwrap();
+        assert!(d.check("foo") && !d.check("bar") && !d.check("foobar"));
     }
 
     #[test]
