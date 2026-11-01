@@ -12,7 +12,7 @@
 //! lines and the stems front-coded, raw-deflated together (the Polish dictionary is under 1 MB).
 //!
 //! Supported: one-character flags (any Unicode character — `FLAG UTF-8`), two-character flags
-//! (`FLAG long`) and numeric flags (`FLAG num`: comma-separated numbers from 1 to 65,535), up to
+//! (`FLAG long`) and numeric flags (`FLAG num`: comma-separated numbers from 0 to 65,535), up to
 //! 65,536 distinct flags in all ([`FlagMode`]), flag aliases (`AF`: a number standing for a set of flags), `PFX`/`SFX` with strip, append and
 //! condition (`.`, letters, `[abc]`, `[^abc]`), cross products, continuation classes on suffixes
 //! (at most two suffixes in a row, as in Hunspell), `FORBIDDENWORD`, `NOSUGGEST`, `KEEPCASE` (the
@@ -482,7 +482,7 @@ pub enum FlagMode {
     Char,
     /// Two characters per flag (`FLAG long`): `Aa`, `B1`.
     Long,
-    /// Decimal numbers from 1 to 65,535 separated by commas (`FLAG num`): `12,104`. As in
+    /// Decimal numbers from 0 to 65,535 separated by commas (`FLAG num`): `12,104`. As in
     /// Hunspell, each number is the item's leading digits: Nepali writes `0/17X` for flag 17.
     Num,
 }
@@ -539,12 +539,13 @@ impl FlagMode {
             FlagMode::Num if field.is_empty() => {}
             FlagMode::Num => {
                 for item in field.split(',') {
-                    // The leading digits (no sign), 1 to 65,535: at most five digits.
+                    // The leading digits (no sign), 0 to 65,535: at most five digits. Hunspell
+                    // reads flag 0 too, and the Turkish dictionary uses it (`SFX 0 N 1`).
                     let digits = item.bytes().take_while(u8::is_ascii_digit).count();
                     let n = if (1..=5).contains(&digits) { item.get(..digits).and_then(|d| d.parse::<u32>().ok()) } else { None };
                     match n {
-                        Some(n @ 1..=0xffff) => push(FlagKey::from(n))?,
-                        _ => return Err(format!("`{}` is not a flag number (1 to 65535)", item.chars().take(20).collect::<String>())),
+                        Some(n @ 0..=0xffff) => push(FlagKey::from(n))?,
+                        _ => return Err(format!("`{}` is not a flag number (0 to 65535)", item.chars().take(20).collect::<String>())),
                     }
                 }
             }
@@ -820,7 +821,7 @@ impl AffixDict {
         // wrongly accepted. One with more than `entry_cap` flags is not a word either, but its
         // FORBIDDENWORD and NOSUGGEST flags still apply to its homonyms: an exclusion is never lost.
         let mut skipped = 0usize;
-        let exclusion_keys = [rules.forbidden, rules.no_suggest];
+        let exclusion_keys = [rules.forbidden, rules.no_suggest, rules.substandard];
         let is_exclusion_key = |k: &FlagKey| exclusion_keys.contains(&Some(*k));
         // Each stem's flags are a range of `stem_keys`: one buffer, not one allocation per stem.
         // The flag says whether the entry is a word (false: it only carries exclusions).
@@ -2446,6 +2447,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn flag_aliases_hold_long_and_numeric_flags() {
+        // `AF` aliases stand for flags written in the FLAG mode: `AaBb` is two long flags,
+        // `12,7` two numbers. Answers match Hunspell 1.7's on the same files.
+        let aff = "SET UTF-8\nFLAG long\nAF 2\nAF AaBb\nAF Bb\nSFX Aa Y 1\nSFX Aa 0 s/2 .\nSFX Bb Y 1\nSFX Bb 0 ly .\n";
+        let d = AffixDict::from_hunspell(aff, "2\nkind/1\nhope/2\n", &[]).unwrap();
+        for w in ["kind", "kinds", "kindly", "kindsly", "hope", "hopely"] {
+            assert!(d.check(w), "{w}");
+        }
+        assert!(!d.check("hopes"));
+        let aff = "SET UTF-8\nFLAG num\nAF 1\nAF 12,7\nSFX 12 Y 1\nSFX 12 0 a .\nPFX 7 Y 1\nPFX 7 0 ne .\n";
+        let d = AffixDict::from_hunspell(aff, "1\ngrad/1\n", &[]).unwrap();
+        for w in ["grad", "grada", "negrad", "negrada"] {
+            assert!(d.check(w), "{w}");
+        }
+        assert!(AffixDict::from_bytes(&d.to_bytes()).unwrap().check("negrada"));
+        // An alias whose flags don't read in the mode leaves its stem out, as a bad field does.
+        let d = AffixDict::from_hunspell("FLAG long\nAF 1\nAF Aab\nSFX Aa Y 1\nSFX Aa 0 s .\n", "2\nodd/1\nkot\n", &[]).unwrap();
+        assert!(!d.check("odd") && d.check("kot"));
+    }
+
+    #[test]
+    fn a_substandard_homonym_past_the_merged_cap_keeps_its_flag() {
+        let n = MAX_FLAGS_PER_STEM / MAX_FLAGS_PER_ENTRY + 1;
+        let x = 60_000;
+        let d = AffixDict::from_hunspell(&format!("FLAG num\nSUBSTANDARD {x}\nSFX 1 Y 1\nSFX 1 0 a .\n"), &homonyms(n, &x.to_string()), &[]).unwrap();
+        assert!(d.check("same") && d.check("samea") && !d.contains_suggestible("same"));
+    }
+
+    #[test]
     fn flag_long_dictionaries_load_check_and_round_trip() {
         let d = AffixDict::from_hunspell(LONG_AFF, LONG_DIC, &[]).unwrap();
         // `odd/Aab` has an odd number of flag characters: the entry is skipped.
@@ -2461,30 +2491,34 @@ pub(crate) mod tests {
 
     #[test]
     fn malformed_flag_numbers_are_refused_in_the_aff_and_skipped_in_the_dic() {
-        for rule in ["x", "0", "65536", "99999999999999999999999", "+5", "-1", "1,2", " "] {
+        for rule in ["x", "65536", "99999999999999999999999", "+5", "-1", "1,2", " "] {
             let aff = format!("FLAG num\nSFX {rule} Y 1\nSFX {rule} 0 a .\n");
             assert!(AffixDict::from_hunspell(&aff, "1\nw/1\n", &[]).is_err(), "rule flag `{rule}`");
         }
-        for cont in ["2,,3", "2,", ",2", "a", "0", "70000", "x2"] {
+        for cont in ["2,,3", "2,", ",2", "a", "70000", "x2"] {
             let aff = format!("FLAG num\nSFX 1 Y 1\nSFX 1 0 a/{cont} .\n");
             assert!(AffixDict::from_hunspell(&aff, "1\nw/1\n", &[]).is_err(), "continuation `{cont}`");
         }
-        for directive in ["FORBIDDENWORD 1,2", "FORBIDDENWORD abc", "NOSUGGEST 0", "NOSUGGEST", "FORBIDDENWORD 65536"] {
+        for directive in ["FORBIDDENWORD 1,2", "FORBIDDENWORD abc", "NOSUGGEST -1", "NOSUGGEST", "FORBIDDENWORD 65536"] {
             assert!(AffixDict::from_hunspell(&format!("FLAG num\n{directive}\n"), "0\n", &[]).is_err(), "{directive}");
         }
         assert!(AffixDict::from_hunspell("SFX a Y 1\nSFX a 0 y .\nFLAG num\n", "0\n", &[]).is_err(), "FLAG after flags");
         assert!(AffixDict::from_hunspell("FLAG num\nFLAG num\nSFX 1 Y 1\nSFX 1 0 a .\n", "0\n", &[]).is_ok());
         // The .dic: entries whose flags don't read are left out; the rest of the file loads.
-        let dic = "8\nok/1\nzero/0\nbig/70000\nhuge/123456789012345678901234567890\nsign/-1\ncomma/1,\nletters/a1\nplain\n";
+        let dic = "8\nok/1\nempty/1,,2\nbig/70000\nhuge/123456789012345678901234567890\nsign/-1\ncomma/1,\nletters/a1\nplain\n";
         let d = AffixDict::from_hunspell("FLAG num\nSFX 1 Y 1\nSFX 1 0 a .\n", dic, &[]).unwrap();
         assert!(d.check("ok") && d.check("oka") && d.check("plain"));
-        for w in ["zero", "big", "huge", "sign", "comma", "commaa", "letters"] {
+        for w in ["empty", "big", "huge", "sign", "comma", "commaa", "letters"] {
             assert!(!d.check(w), "{w}");
         }
         assert_eq!(d.len(), 2);
         // Text after a number's digits is ignored, as Hunspell does (Nepali's `0/17X`).
         let d = AffixDict::from_hunspell("FLAG num\nSFX 1 Y 1\nSFX 1 0 a/2X .\nSFX 2 N 1\nSFX 2 0 i .\n", "1\nw/1x,7\n", &[]).unwrap();
         assert!(d.check("wa") && d.check("wai") && !d.check("wi"));
+        // Flag 0 is a flag, as Hunspell reads it (the Turkish dictionary's `SFX 0 N 1`).
+        let d = AffixDict::from_hunspell("FLAG num\nSFX 0 N 1\nSFX 0 0 de .\n", "2\nev/0\nsu/0,1\n", &[]).unwrap();
+        assert!(d.check("evde") && d.check("sude") && !d.check("kolde"));
+        assert!(AffixDict::from_bytes(&d.to_bytes()).unwrap().check("evde"));
     }
 
     #[test]
