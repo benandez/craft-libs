@@ -88,42 +88,61 @@ pub(crate) fn set_budget(bytes: u64) {
 }
 
 /// Hunspell file names for `locale`, best first: `fr-fr` → `fr_FR`, `fr-FR`, `fr`;
-/// `sr-latn` → `sr_Latn`, `sr-Latn` (never plain `sr`, another script).
+/// `sr-latn` → `sr_Latn`, `sr-Latn` (never plain `sr`, which is Cyrillic); `sr-cyrl-rs` →
+/// `sr_Cyrl_RS`, `sr-Cyrl-RS`, `sr_Cyrl`, `sr-Cyrl`, `sr_RS`, `sr-RS`, `sr` (Cyrillic is Serbian's
+/// default script, [`crate::lang::default_script`]); `sr` → `sr`, `sr_Cyrl`, `sr-Cyrl`.
 pub(crate) fn names(locale: PackLocale) -> Vec<String> {
     let parts: Vec<&str> = locale.as_str().split('-').collect();
+    let script = parts.iter().position(|p| crate::lang::is_script(p));
     let cased: Vec<String> = parts
         .iter()
         .enumerate()
-        .map(|(i, p)| match (i, p.len()) {
-            (0, _) => (*p).to_string(),
-            (_, 2) => p.to_ascii_uppercase(),
-            (_, 4) => {
+        .map(|(i, p)| {
+            if i == 0 {
+                (*p).to_string()
+            } else if Some(i) == script {
                 let mut c = p.chars();
                 c.next().map(|f| f.to_ascii_uppercase().to_string() + c.as_str()).unwrap_or_default()
+            } else if p.len() == 2 {
+                p.to_ascii_uppercase()
+            } else {
+                (*p).to_string()
             }
-            _ => (*p).to_string(),
         })
         .collect();
     let mut out: Vec<String> = Vec::new();
-    let mut push = |n: String| {
-        if !out.contains(&n) {
-            out.push(n);
+    let mut push = |parts: &[String]| {
+        for sep in ["_", "-"] {
+            let n = parts.join(sep);
+            if !out.contains(&n) {
+                out.push(n);
+            }
         }
     };
-    // Each shorter prefix too (`sr-latn-rs` → `sr-latn`), but not past a script subtag.
-    let script = parts.iter().position(|p| p.len() == 4).unwrap_or(usize::MAX);
-    for n in (1..=cased.len()).rev() {
-        if n <= script && script != usize::MAX {
-            break;
-        }
-        let prefix = cased.get(..n).unwrap_or_default();
-        push(prefix.join("_"));
-        push(prefix.join("-"));
+    let primary = locale.primary();
+    let default = crate::lang::default_script(primary);
+    // Each shorter prefix too (`sr-latn-rs` → `sr-latn`), never dropping the script subtag.
+    let keep = script.map_or(1, |s| s + 1);
+    for n in (keep..=cased.len()).rev() {
+        push(cased.get(..n).unwrap_or_default());
     }
-    if script != usize::MAX {
-        let prefix = cased.get(..=script).unwrap_or_default();
-        push(prefix.join("_"));
-        push(prefix.join("-"));
+    match script {
+        // The language's default script: its script-less names are in that script too.
+        Some(s) if parts.get(s).is_some_and(|p| Some(*p) == default) => {
+            let without: Vec<String> = cased.iter().enumerate().filter(|(i, _)| *i != s).map(|(_, p)| p.clone()).collect();
+            for n in (1..=without.len()).rev() {
+                push(without.get(..n).unwrap_or_default());
+            }
+        }
+        Some(_) => {}
+        // No script named: the language's default one may be spelled out (`sr-Cyrl`).
+        None => {
+            if let Some(d) = default {
+                let mut c = d.chars();
+                let d = c.next().map(|f| f.to_ascii_uppercase().to_string() + c.as_str()).unwrap_or_default();
+                push(&[primary.to_string(), d]);
+            }
+        }
     }
     out
 }
@@ -259,7 +278,13 @@ mod tests {
         assert_eq!(names(l("fr-FR")), ["fr_FR", "fr-FR", "fr"]);
         assert_eq!(names(l("sr-Latn")), ["sr_Latn", "sr-Latn"]);
         assert_eq!(names(l("sr-Latn-RS")), ["sr_Latn_RS", "sr-Latn-RS", "sr_Latn", "sr-Latn"]);
+        assert_eq!(names(l("sr-Cyrl-RS")), ["sr_Cyrl_RS", "sr-Cyrl-RS", "sr_Cyrl", "sr-Cyrl", "sr_RS", "sr-RS", "sr"]);
+        assert_eq!(names(l("bs-Latn-BA")), ["bs_Latn_BA", "bs-Latn-BA", "bs_Latn", "bs-Latn", "bs_BA", "bs-BA", "bs"]);
+        assert_eq!(names(l("sr")), ["sr", "sr_Cyrl", "sr-Cyrl"]);
+        // A four-character subtag that isn't letters is no script.
+        assert_eq!(names(l("de-1996")), ["de_1996", "de-1996", "de"]);
         assert_eq!(hyphenation_locales(l("fr-CA")), ["fr-ca", "fr"]);
         assert_eq!(hyphenation_locales(l("sr-Latn")), ["sr-latn"]);
+        assert_eq!(hyphenation_locales(l("sr-Cyrl")), ["sr-cyrl", "sr"]);
     }
 }

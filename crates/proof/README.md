@@ -97,7 +97,8 @@ for `Other` (use `pack_locale()`).
 
 **Which pack serves a language:** its locale, then shorter prefixes (`fr-ca` → `fr`), then another
 region's pack of the same language (`nl` → `nl-be`), never another script's (`sr-latn` never reads
-`sr`). The existing languages map their Hunspell names the same way (`pt_BR` → `pt-br`, `pt`, any
+`sr`, which is Cyrillic). A tag naming its language's default script reads the script-less packs
+(`sr-Cyrl-RS` → `sr`, `bs-Latn-BA` → `bs`), from a small default-script table. The existing languages map their Hunspell names the same way (`pt_BR` → `pt-br`, `pt`, any
 `pt-*`).
 
 Spelling dictionaries and hyphenation patterns for other languages come as **Language packs**:

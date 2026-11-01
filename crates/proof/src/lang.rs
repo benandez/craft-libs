@@ -285,6 +285,31 @@ impl std::fmt::Display for PackLocale {
     }
 }
 
+/// Is a subtag a script (four ASCII letters: `Latn`, `cyrl`)?
+pub(crate) fn is_script(subtag: &str) -> bool {
+    subtag.len() == 4 && subtag.bytes().all(|b| b.is_ascii_alphabetic())
+}
+
+/// The script a language is written in when its tag names none, lowercase, for the languages
+/// written in more than one (or whose packs may name it): Serbian is Cyrillic, Bosnian and
+/// Croatian Latin… `None`: the language doesn't say, and a pack naming a script never serves it.
+pub(crate) fn default_script(primary: &str) -> Option<&'static str> {
+    Some(match primary {
+        "sr" | "ru" | "uk" | "be" | "bg" | "mk" | "kk" | "ky" | "tg" | "mn" | "tt" | "ba" | "cv" | "os" | "ce" => "cyrl",
+        "bs" | "hr" | "sh" | "az" | "uz" | "tk" | "ms" | "ha" | "ro" | "sq" | "tr" | "ku" | "so" => "latn",
+        "zh" => "hans",
+        "pa" => "guru",
+        _ => return None,
+    })
+}
+
+/// The script of a tag (`sr-latn`, `sr_Latn`): the one it names, else its language's default.
+pub(crate) fn effective_script(tag: &str) -> Option<String> {
+    let mut parts = tag.split(['-', '_']);
+    let primary = parts.next().unwrap_or_default().to_ascii_lowercase();
+    parts.find(|p| is_script(p)).map(str::to_ascii_lowercase).or_else(|| default_script(&primary).map(str::to_string))
+}
+
 /// The region of a tag: the first two-letter or three-digit subtag after the language and
 /// script, before any singleton; a POSIX `.UTF-8` or `@…` tail is ignored.
 fn region(tag: &str) -> Option<&str> {

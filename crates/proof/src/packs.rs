@@ -362,16 +362,20 @@ fn locales_for(names: &[&str]) -> Vec<String> {
     for n in names {
         push(n.to_ascii_lowercase().replace('_', "-"));
     }
-    // The primary language alone, unless a script is named (`sr_Latn` is never plain `sr`).
-    for n in names.iter().filter(|n| !has_script(n)) {
-        push(n.split(['_', '-']).next().unwrap_or_default().to_ascii_lowercase());
+    // The primary language alone, when it is written in the same script (`sr_Latn` is never
+    // plain `sr`, which is Cyrillic; `sr_Cyrl` is).
+    for n in names {
+        let primary = n.split(['_', '-']).next().unwrap_or_default().to_ascii_lowercase();
+        if same_script(n, &primary) {
+            push(primary);
+        }
     }
     out
 }
 
-/// Does a tag or file name name a script (a four-letter subtag after the language: `sr-Latn`)?
-fn has_script(tag: &str) -> bool {
-    tag.split(['_', '-']).skip(1).any(|p| p.len() == 4 && p.bytes().all(|b| b.is_ascii_alphabetic()))
+/// Are two tags written in the same script ([`crate::lang::effective_script`])?
+fn same_script(a: &str, b: &str) -> bool {
+    crate::lang::effective_script(a) == crate::lang::effective_script(b)
 }
 
 /// The installed packs to read for `locales`, in that order, then any other pack of their
@@ -386,10 +390,10 @@ fn packs_for(locales: &[String], has: impl Fn(&Holds) -> bool) -> Vec<PathBuf> {
         }
     }
     // Then another region's pack of the same language (`pt` → `pt-br`), never another script's.
-    let primaries: Vec<&str> = locales.iter().filter(|l| !has_script(l)).map(|l| l.split('-').next().unwrap_or_default()).collect();
     for (p, _) in usable() {
         let primary = p.locale.split('-').next().unwrap_or_default();
-        if primaries.contains(&primary) && !has_script(&p.locale) && !out.contains(&p.path) {
+        let fits = locales.iter().any(|l| l.split('-').next() == Some(primary) && same_script(l, &p.locale));
+        if fits && !out.contains(&p.path) {
             out.push(p.path.clone());
         }
     }

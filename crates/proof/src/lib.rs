@@ -1533,6 +1533,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Review of #485: a tag naming its language's default script reads the script-less pack
+    /// (`sr-Cyrl-RS` reads `sr`, `bs-Latn-BA` reads `bs`); another script never does (`sr-Latn`
+    /// never reads `sr`, `sr` never reads `sr-latn`).
+    #[test]
+    fn packs_follow_the_script() {
+        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let root = std::env::temp_dir().join(format!("wc-proof-script-packs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dic = |w: &str| format!("1\n{w}\n");
+        let sr = write_pack(&root, "sr", &[("spelling.aff", b"SET UTF-8\n"), ("spelling.dic", dic("кућа").as_bytes())]);
+        let bs = write_pack(&root, "bs", &[("spelling.aff", b"SET UTF-8\n"), ("spelling.dic", dic("kuća").as_bytes())]);
+        packs::set_packs_dir(Some(root.clone()));
+        let file = |tag: &str| pack_dictionary_file(ProofLang::from_tag(Some(tag)));
+        assert_eq!(file("sr-Cyrl-RS"), Some(sr.join("spelling.dic")));
+        assert_eq!(file("sr-RS"), Some(sr.join("spelling.dic")));
+        assert_eq!(file("bs-Latn-BA"), Some(bs.join("spelling.dic")));
+        assert_eq!(file("sr-Latn-RS"), None, "Latin Serbian never reads the Cyrillic pack");
+        assert!(!is_correct_in("кућаа", ProofLang::from_tag(Some("sr-Cyrl"))));
+        let latin = write_pack(&root, "sr-latn", &[("spelling.aff", b"SET UTF-8\n"), ("spelling.dic", dic("kuća").as_bytes())]);
+        std::fs::remove_dir_all(&sr).unwrap();
+        packs::reload();
+        assert_eq!(file("sr-Latn-RS"), Some(latin.join("spelling.dic")));
+        assert_eq!(file("sr"), None, "Serbian (Cyrillic) never reads the Latin pack");
+        assert_eq!(file("sr-Cyrl-RS"), None);
+        packs::set_packs_dir(None);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Pack languages for the cache tests: `qa`, `qb`… each knowing `word<locale>`.
     fn many_packs(root: &std::path::Path, n: usize) -> Vec<ProofLang> {
         (0..n)
