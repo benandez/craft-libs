@@ -1115,9 +1115,8 @@ fn starts_consonant_sound(w: &str) -> bool {
 #[cfg(test)]
 pub(crate) static DICTIONARY_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// The no-Language-data build (`build.rs` sets `craft_proof_data` when the English word list is
-/// embedded).
-#[cfg(all(test, not(craft_proof_data)))]
+/// The no-Language-data build (`build.rs` sets `craft_proof_no_data` when nothing is embedded).
+#[cfg(all(test, craft_proof_no_data))]
 mod no_data;
 
 #[cfg(test)]
