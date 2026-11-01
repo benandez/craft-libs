@@ -28,12 +28,9 @@ const COMMON_REPLACEMENTS: &[(&str, &str)] = &[
     ("sarmısak", "sarımsak"),
     ("makina", "makine"),
     ("ünvan", "unvan"),
-    ("rastlantı", "rastlantı"),
     ("labaratuvar", "laboratuvar"),
     ("laboratuar", "laboratuvar"),
-    ("kravat", "kravat"),
     ("gardolap", "gardırop"),
-    ("egzoz", "egzoz"),
     ("egzozt", "egzoz"),
     ("egsoz", "egzoz"),
     ("gelcen", "geleceksin"),
@@ -258,10 +255,23 @@ pub fn turkish_to_lower(s: &str) -> String {
     out
 }
 
+/// Turkish uppercase with dotted/dotless I support (`i` -> `İ`, `ı` -> `I`).
+pub fn turkish_to_upper(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            'i' => out.push('İ'),
+            'ı' => out.push('I'),
+            other => out.extend(other.to_uppercase()),
+        }
+    }
+    out
+}
+
 /// Match original casing on suggestion.
 fn match_casing(orig: &str, cand: &str) -> String {
     if orig.chars().all(char::is_uppercase) {
-        cand.to_uppercase()
+        turkish_to_upper(cand)
     } else if orig.chars().next().is_some_and(char::is_uppercase) {
         super::grammar::turkish_capitalize(cand)
     } else {
@@ -272,6 +282,19 @@ fn match_casing(orig: &str, cand: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CodeRabbit on craft-libs#484/#489: a suggestion in capitals uses Turkish capitals
+    /// (`İ`, not `I`), and no table entry suggests the word itself.
+    #[test]
+    fn capitals_are_turkish_and_no_entry_suggests_itself() {
+        assert_eq!(match_casing("KİTAPP", "kitap"), "KİTAP");
+        assert_eq!(match_casing("ISTANBUL", "istanbul"), "İSTANBUL");
+        assert_eq!(match_casing("KAPI", "kapı"), "KAPI");
+        assert_eq!(turkish_to_upper("ıiçşğüö"), "IİÇŞĞÜÖ");
+        let d = TrDict::from_hunspell("SET UTF-8\n", "2\nkitap\nistanbul\n").unwrap();
+        assert!(suggest_with(&d, "KİTAPP", 3).contains(&"KİTAP".to_string()));
+        assert!(COMMON_REPLACEMENTS.iter().all(|(a, b)| a != b));
+    }
 
     #[test]
     fn common_replacements_are_suggested() {
