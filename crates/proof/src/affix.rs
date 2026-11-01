@@ -795,9 +795,10 @@ fn intersects(a: &[u16], b: &[u16]) -> bool {
 /// Directives an English dictionary may carry that this engine doesn't implement but that don't
 /// change which English words are right, ignored by [`AffixDict::from_hunspell_english`]:
 /// flag-based compounding (English dictionaries compound only ordinals, by `COMPOUNDRULE`, which
-/// is read) and output conversion (`OCONV`: how suggestions are written, such as `'` as `’`).
+/// is read). Output conversion (`OCONV`) is read, for English as for every language: suggestions
+/// are written as the dictionary says (`don’t`).
 const IGNORED_IN_ENGLISH: &[&str] =
-    &["COMPOUNDBEGIN", "COMPOUNDEND", "COMPOUNDFIRST", "COMPOUNDFLAG", "COMPOUNDLAST", "COMPOUNDMIDDLE", "COMPOUNDPERMITFLAG", "OCONV"];
+    &["COMPOUNDBEGIN", "COMPOUNDEND", "COMPOUNDFIRST", "COMPOUNDFLAG", "COMPOUNDLAST", "COMPOUNDMIDDLE", "COMPOUNDPERMITFLAG"];
 
 /// Read Hunspell `.aff` text (already decoded to UTF-8). `english`: ignore the directives in
 /// [`IGNORED_IN_ENGLISH`] instead of refusing them.
@@ -944,10 +945,10 @@ impl AffixDict {
         AffixDict::from_hunspell_in(aff, dic, comments, false)
     }
 
-    /// [`AffixDict::from_hunspell`] for an English dictionary: flag-based compounding and output
-    /// conversion (`COMPOUNDFLAG`, `OCONV`…), which this engine doesn't implement and English
-    /// spelling doesn't need, are ignored rather than refused. `COMPOUNDRULE`, `ONLYINCOMPOUND`
-    /// and `COMPOUNDMIN` (ordinals: `21st`) are read, as for every language.
+    /// [`AffixDict::from_hunspell`] for an English dictionary: flag-based compounding
+    /// (`COMPOUNDFLAG`…), which this engine doesn't implement and English spelling doesn't need,
+    /// is ignored rather than refused. `COMPOUNDRULE`, `ONLYINCOMPOUND` and `COMPOUNDMIN`
+    /// (ordinals: `21st`) and `OCONV` are read, as for every language.
     pub fn from_hunspell_english(aff: &str, dic: &str, comments: &[&str]) -> Result<AffixDict, String> {
         AffixDict::from_hunspell_in(aff, dic, comments, true)
     }
@@ -2919,8 +2920,9 @@ pub(crate) mod tests {
 
     /// craft-libs#482 review: an English dictionary with compounding and output conversion, as the
     /// usual en_US and en_GB ones have, loads for English: `COMPOUNDRULE` makes its ordinals, its
-    /// `ONLYINCOMPOUND` stems are words only inside them, and `COMPOUNDFLAG` and `OCONV` are
-    /// ignored. Other languages still refuse those two. (A synthetic `.aff` written for this test.)
+    /// `ONLYINCOMPOUND` stems are words only inside them, `COMPOUNDFLAG` is ignored (other
+    /// languages still refuse it) and `OCONV` is applied to suggestions. (A synthetic `.aff`
+    /// written for this test.)
     #[test]
     fn english_dictionaries_ignore_compounding_and_output_conversion() {
         let aff = "SET UTF-8\nTRY esianrtolcdugmphbyfvkwz'\nICONV 1\nICONV ’ '\nOCONV 1\nOCONV ' ’\nNOSUGGEST !\n\
@@ -2935,6 +2937,11 @@ pub(crate) mod tests {
         assert!(!d.check("0th") && !d.check("1th"), "parts of compounds only");
         assert!(d.check("1st") && d.check("11th") && d.check("111th") && !d.check("11st"), "ordinals by COMPOUNDRULE");
         assert!(!d.check("housed") && !d.check("hous"));
+        // OCONV is read and applied to suggestions, as Hunspell does: `'` is shown as `’`.
+        let d = AffixDict::from_hunspell_english(aff, "2\ndon't\nwalk/S\n", &[]).unwrap();
+        assert_eq!(d.output("don't"), "don’t");
+        assert!(d.check("don't") && d.check("don’t"), "ICONV reads it back");
+        assert!(crate::affix_suggest::suggest_in(&d, "donn't", 4, &crate::affix_suggest::Tuning::DEFAULT).contains(&"don’t".to_string()));
         // The directives that change which words are right are still refused.
         assert!(AffixDict::from_hunspell_english("PSEUDOROOT X\n", dic, &[]).is_err(), "PSEUDOROOT");
     }
