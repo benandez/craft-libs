@@ -1142,6 +1142,23 @@ fn starts_consonant_sound(w: &str) -> bool {
 #[cfg(test)]
 pub(crate) static DICTIONARY_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Hold [`DICTIONARY_TESTS`] until this test ends (libtest runs each test on its own thread, and
+/// the guard drops with the thread); a second call on the thread does nothing. The tests that
+/// change the dictionaries folder or the packs call it, and so does every in-memory test
+/// dictionary's `install`, which a reload elsewhere would otherwise drop mid-test.
+#[cfg(test)]
+pub(crate) fn hold_dictionary_tests() {
+    thread_local! {
+        static HELD: std::cell::RefCell<Option<std::sync::MutexGuard<'static, ()>>> = const { std::cell::RefCell::new(None) };
+    }
+    HELD.with(|held| {
+        let mut held = held.borrow_mut();
+        if held.is_none() {
+            *held = Some(DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        }
+    });
+}
+
 /// The no-Language-data build (`build.rs` sets `craft_proof_no_data` when nothing is embedded).
 #[cfg(all(test, craft_proof_no_data))]
 mod no_data;
@@ -1264,7 +1281,7 @@ mod tests {
         if scowl_embedded() {
             return;
         }
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         let dir = std::env::temp_dir().join(format!("wc-proof-en-hunspell-{}", std::process::id()));
         // A tiny en_US. `hous` and `because` aren't words in it, so a marked `because` is this
         // dictionary answering (the built-in list knows it).
@@ -1307,7 +1324,7 @@ mod tests {
     /// bounded, and stays quick.
     #[test]
     fn many_pack_languages_keep_the_hyphenation_cache_bounded() {
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         set_dictionaries_folder(Some(shared_test_folder()));
         let root = std::env::temp_dir().join(format!("wc-proof-many-tags-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
@@ -1337,7 +1354,7 @@ mod tests {
         if scowl_embedded() {
             return;
         }
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         set_dictionaries_folder(Some(shared_test_folder()));
         let root = std::env::temp_dir().join(format!("wc-proof-en-pack-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1375,7 +1392,7 @@ mod tests {
         if scowl_embedded() {
             return;
         }
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         let dir = std::env::temp_dir().join(format!("wc-proof-en-unreadable-{}", std::process::id()));
         let english: &[(&str, &[u8], &[u8])] =
             &[("en_US", b"SET UTF-8\n", b"0\n"), ("en_GB", b"SET SHIFT_JIS\n", b"1\ncolour\n"), ("en_CA", b"SET UTF-8\n", b"1\n\xff\xfe\n")];
@@ -1404,7 +1421,7 @@ mod tests {
         if scowl_embedded() {
             return;
         }
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         let dir = std::env::temp_dir().join(format!("wc-proof-en-next-{}", std::process::id()));
         let aff: &[u8] = b"SET UTF-8\nICONV 1\nICONV \xe2\x80\x99 '\nOCONV 1\nOCONV ' \xe2\x80\x99\nCOMPOUNDMIN 1\nONLYINCOMPOUND c\n\
                   COMPOUNDRULE 1\nCOMPOUNDRULE n*1t\nSFX S Y 1\nSFX S 0 s .\n";
@@ -1441,7 +1458,7 @@ mod tests {
     /// stays set for the rest of the run for that reason.
     #[test]
     fn dictionaries_folder_is_searched_first() {
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         let dir = std::env::temp_dir().join(format!("wc-proof-dictionaries-{}", std::process::id()));
         write_test_dictionaries(&dir);
         // #3252 review: force Russian and Czech to cache whatever they find before the folder is
@@ -1513,7 +1530,7 @@ mod tests {
     /// one), so Croatian tests running meanwhile see the same words.
     #[test]
     fn an_installed_pack_is_used_and_a_removed_one_is_not() {
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         // The test dictionaries on disk first, so a reload never leaves other tests without them.
         set_dictionaries_folder(Some(shared_test_folder()));
         let root = std::env::temp_dir().join(format!("wc-proof-packs-{}", std::process::id()));
@@ -1600,7 +1617,7 @@ mod tests {
     /// unaffected. No grammar rules for it.
     #[test]
     fn a_pack_proofs_a_language_without_its_own_tools() {
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         // The test dictionaries on disk first, so a reload never leaves other tests without them.
         set_dictionaries_folder(Some(shared_test_folder()));
         let root = std::env::temp_dir().join(format!("wc-proof-nl-pack-{}", std::process::id()));
@@ -1666,7 +1683,7 @@ mod tests {
     /// letter, so a misspelt Hebrew or Arabic word is still marked.
     #[test]
     fn caseless_scripts_are_not_read_as_uppercase() {
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         set_dictionaries_folder(Some(shared_test_folder()));
         let root = std::env::temp_dir().join(format!("wc-proof-caseless-packs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1702,7 +1719,7 @@ mod tests {
     /// another region's pack.
     #[test]
     fn regional_text_reads_its_own_regions_pack() {
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         set_dictionaries_folder(Some(shared_test_folder()));
         let root = std::env::temp_dir().join(format!("wc-proof-region-packs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1799,7 +1816,7 @@ mod tests {
     /// dictionary slot, are spelled from their Language pack (or a Hunspell dictionary) too.
     #[test]
     fn german_and_bulgarian_are_spelled_from_their_packs() {
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         set_dictionaries_folder(Some(shared_test_folder()));
         let root = std::env::temp_dir().join(format!("wc-proof-de-bg-packs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1831,7 +1848,7 @@ mod tests {
     /// never reads `sr`, `sr` never reads `sr-latn`).
     #[test]
     fn packs_follow_the_script() {
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         set_dictionaries_folder(Some(shared_test_folder()));
         let root = std::env::temp_dir().join(format!("wc-proof-script-packs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1860,7 +1877,7 @@ mod tests {
     /// word in a Russian or Dutch run is hyphenated as it was without the pack.
     #[test]
     fn pack_patterns_only_hyphenate_their_script() {
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         set_dictionaries_folder(Some(shared_test_folder()));
         let root = std::env::temp_dir().join(format!("wc-proof-script-hyphen-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1893,7 +1910,7 @@ mod tests {
     /// Review of #485: licence texts are read up to a total, however many packs hold big files.
     #[test]
     fn licence_texts_are_capped_in_all() {
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         set_dictionaries_folder(Some(shared_test_folder()));
         let root = std::env::temp_dir().join(format!("wc-proof-licence-cap-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1928,7 +1945,7 @@ mod tests {
     /// entries), so switching between them never reads a dictionary again.
     #[test]
     fn many_pack_languages_load_once() {
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         set_dictionaries_folder(Some(shared_test_folder()));
         let root = std::env::temp_dir().join(format!("wc-proof-many-packs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1964,7 +1981,7 @@ mod tests {
     /// never evicted, so the paragraph loads each once.
     #[test]
     fn a_paragraph_never_evicts_its_own_dictionaries() {
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         set_dictionaries_folder(Some(shared_test_folder()));
         let root = std::env::temp_dir().join(format!("wc-proof-budget-packs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1988,7 +2005,7 @@ mod tests {
     /// can't be read are reported, never a panic, and the pack (or that file) is skipped.
     #[test]
     fn corrupt_packs_are_reported_and_skipped() {
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         // The test dictionaries on disk first, so a reload never leaves other tests without them.
         set_dictionaries_folder(Some(shared_test_folder()));
         let root = std::env::temp_dir().join(format!("wc-proof-bad-packs-{}", std::process::id()));
@@ -2052,7 +2069,7 @@ mod tests {
     /// there.
     #[test]
     fn every_dictionary_language_reports_its_load_error() {
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         for (lang, _) in installed_dictionaries() {
             let name = dictionary_needed(lang, false).unwrap();
             let reason = format!("zq unreadable {name}");
@@ -2079,7 +2096,7 @@ mod tests {
     #[test]
     fn list_item_first_word_needs_no_capital() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         let grammar = |t: &str, lang: ProofLang, list: bool| -> Vec<String> {
             check_text_with(t, &[(0..t.len(), lang)], &Options::default(), true, list)
                 .into_iter()
@@ -2116,7 +2133,7 @@ mod tests {
     #[test]
     fn spelling() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         for w in [
             "if",
             "we",
@@ -2149,7 +2166,7 @@ mod tests {
     #[test]
     fn ically_adverbs_are_known() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         for w in ["specifically", "scientifically", "automatically", "dramatically", "Specifically"] {
             assert!(is_correct(w), "{w}");
         }
@@ -2164,7 +2181,7 @@ mod tests {
     #[test]
     fn non_ic_words_do_not_take_ally() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         for (base, wrong) in [("desktop", "desktopally"), ("house", "houseally"), ("final", "finalally"), ("green", "greenally")] {
             assert!(is_correct(base), "{base}");
             assert!(!is_correct(wrong), "{wrong}");
@@ -2176,7 +2193,7 @@ mod tests {
     #[test]
     fn common_modern_words() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         for w in [
             "desktop",
             "Desktops",
@@ -2215,7 +2232,7 @@ mod tests {
     #[test]
     fn british_spellings_are_known() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         for w in [
             "judgement",
             "defence",
@@ -2264,7 +2281,7 @@ mod tests {
     #[test]
     fn english_dialects_flag_each_others_spellings() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         let (us, gb, ca) = (ProofLang::En, ProofLang::EnGb, ProofLang::EnCa);
         // (word, right in en-US, right in en-CA, right in en-GB)
         let cases = [
@@ -2359,7 +2376,7 @@ mod tests {
     #[test]
     fn british_words_reported_in_issue_40_are_right_in_en_gb() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         let (us, gb, ca) = (ProofLang::En, ProofLang::EnGb, ProofLang::EnCa);
         // (word, right in en-US, right in en-CA, right in en-GB)
         let cases = [
@@ -2407,7 +2424,7 @@ mod tests {
     #[test]
     fn more_british_spellings_are_right_in_en_gb() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         let gb = ProofLang::EnGb;
         assert_eq!(ProofLang::from_tag(Some("en-AU")), gb);
         for w in [
@@ -2586,7 +2603,7 @@ mod tests {
     #[test]
     fn user_dictionary_accepts_the_other_dialects_spelling() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         add_word("savour");
         assert!(is_correct_in("savour", ProofLang::En), "a word the user added is never flagged");
         assert!(!is_correct_in("savor", ProofLang::EnGb));
@@ -2607,7 +2624,7 @@ mod tests {
     /// marks both misspellings (R6.4).
     #[test]
     fn spelling_issues_in_text() {
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         let t = "This sentense has a mispelled word, see https://example.com/xyzq.";
         let v = check_spelling(t);
         let bad: Vec<&str> = v.iter().map(|i| &t[i.start..i.end]).collect();
@@ -2618,7 +2635,7 @@ mod tests {
     #[test]
     fn address_token_covers_every_word_split_out_of_it() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         // #1335: one whitespace-delimited token, however punctuation splits it, has one
         // web/e-mail classification, shared by all its words.
         let t = "zxq@mail.example.com,blorp;qwirpy wugwug";
@@ -2635,7 +2652,7 @@ mod tests {
     #[test]
     fn address_after_a_wide_space_is_an_internet_token() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         // A web or e-mail address after a no-break space, a narrow no-break space, a figure space
         // or an ideographic space is skipped, as it is after a plain space.
         let t = "see\u{a0}https://xyzq.example/blorp and\u{3000}www.qwirpy.example or\u{a0}zxq@mail.example \
@@ -2650,7 +2667,7 @@ mod tests {
     #[test]
     fn spelling_scales_over_one_long_token() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         // #1335: thousands of punctuation-separated words inside a single
         // whitespace-free token: one classification for the token, one issue per
         // misspelled word, through every public spelling entry point. Without the Language data
@@ -2718,7 +2735,7 @@ mod tests {
     #[test]
     fn user_dictionary_works() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         assert!(!is_correct("zxqwordcrafty"));
         add_word("zxqwordcrafty");
         assert!(is_correct("zxqwordcrafty"));
@@ -2728,7 +2745,7 @@ mod tests {
     #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
     #[test]
     fn user_dictionary_persists_through_a_file() {
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         let dir = std::env::temp_dir().join(format!("wc-dict-{}-{}", std::process::id(), "persist"));
         let _ = std::fs::remove_dir_all(&dir);
         // The folder is created on the first save.
@@ -2753,7 +2770,7 @@ mod tests {
     #[test]
     fn hostile_dictionary_files_are_capped() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         let dir = std::env::temp_dir().join(format!("wc-dict-{}-{}", std::process::id(), "hostile"));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("custom-dictionary.txt");
@@ -2778,7 +2795,7 @@ mod tests {
     #[test]
     fn saving_merges_with_the_file() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         let dir = std::env::temp_dir().join(format!("wc-dict-{}-{}", std::process::id(), "merge"));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("custom-dictionary.txt");
@@ -2798,7 +2815,7 @@ mod tests {
     #[test]
     fn ignored_words_are_not_dictionary_words() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         assert!(!is_correct("zxqignoredword"));
         ignore_word("ZxqIgnoredWord");
         assert!(is_correct("zxqignoredword"));
@@ -2844,7 +2861,7 @@ mod tests {
     #[test]
     fn decomposed_words_stay_whole() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         let text = "tambie\u{301}n, cafe\u{301}  \u{301}x";
         let ws: Vec<&str> = words(text).into_iter().map(|(a, b)| &text[a..b]).collect();
         assert_eq!(ws, ["tambie\u{301}n", "cafe\u{301}", "\u{301}x"]);
@@ -2860,7 +2877,7 @@ mod tests {
     /// an NFD entry in a saved file loads (and saves) composed, and either form removes it.
     #[test]
     fn user_dictionary_and_ignore_all_match_both_normalization_forms() {
-        let _guard = DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         es::test_dict::install();
         let es = ProofLang::Es;
         let (nfd, nfc) = ("zqprue\u{301}ba", "zqpruéba");
@@ -2937,7 +2954,7 @@ mod tests {
     #[test]
     fn each_language_uses_its_own_tools() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         pl::test_dict::install();
         let pl = "Zażółć gęślą jaźń, chrząszcz brzmi w trzcinie.";
         assert!(check_spelling_in(pl, ProofLang::Pl).is_empty(), "{:?}", check_spelling_in(pl, ProofLang::Pl));
@@ -2960,7 +2977,7 @@ mod tests {
     #[test]
     fn italian_uses_its_own_tools() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         it::test_dict::install();
         let it = "La città vecchia ha un bel caffè in piazza.";
         assert!(check_spelling_in(it, ProofLang::It).is_empty(), "{:?}", check_spelling_in(it, ProofLang::It));
@@ -2978,7 +2995,7 @@ mod tests {
     #[test]
     fn mixed_language_paragraphs_check_each_run_in_its_language() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         pl::test_dict::install();
         // A Polish paragraph quoting English: English spelling and rules inside the quote only.
         let t = "Napisał „the quick brown fox is is here” i poszedł spać, bo żeka wylała.";

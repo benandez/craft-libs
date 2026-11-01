@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn decomposed_accents_are_checked_like_composed_ones() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         test_dict::install();
         for lang in VARIETIES {
             for text in ["esto también", "esto tambie\u{301}n", "una cancio\u{301}n y pingu\u{308}ino", "CANCIO\u{301}N", "nin\u{303}o"] {
@@ -292,7 +292,7 @@ mod tests {
     #[test]
     fn spanish_dispatch_messages_options_and_mixed_spans() {
         // English results depend on the dictionaries other tests install.
-        let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hold_dictionary_tests();
         test_dict::install();
         for tag in ["es-ES", "es-MX", "es-419", "es-AR", "es-UY", "spa"] {
             assert!(crate::has_dictionary(Some(tag)), "{tag}");

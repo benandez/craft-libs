@@ -62,7 +62,7 @@ fn nothing_is_embedded() {
 /// crate. Either way a misspelling is marked and common words are right. (Before, everything was right.)
 #[test]
 fn english_spelling_still_marks_misspellings() {
-    let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    crate::hold_dictionary_tests();
     for l in [ProofLang::En, ProofLang::EnGb, ProofLang::EnCa] {
         assert!(matches!(crate::english_source(l), Some(EnglishSource::Hunspell(_) | EnglishSource::CoreList)), "{l:?}");
         assert!(!crate::is_correct_in("becuase", l) && !crate::is_correct_in("teh", l), "{l:?}");
@@ -119,7 +119,7 @@ fn hyphenation_is_off_where_it_needs_data() {
 #[test]
 fn every_public_function_runs_without_data() {
     // English results depend on the dictionaries other tests install.
-    let _guard = crate::DICTIONARY_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    crate::hold_dictionary_tests();
     let lim = Limits { min_word: 0, after_first: 0, before_last: 0, capitalized: true };
     let opts = Options { ignore_uppercase: false, ignore_numbers: false, ignore_internet: false };
     for text in SAMPLES {
