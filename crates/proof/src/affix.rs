@@ -1022,6 +1022,9 @@ impl AffixDict {
             merged.clear();
             carried.clear();
             let mut is_word = false;
+            // NEEDAFFIX belongs to its homonym: the word stands alone if any homonym does
+            // (`foo/NA` and `foo/B`: `foo` is right).
+            let mut all_need = true;
             let mut j = i;
             while let Some((w, a, b, entry_is_word)) = stems.get(j)
                 && w == word
@@ -1038,6 +1041,7 @@ impl AffixDict {
                     continue;
                 }
                 is_word = true;
+                all_need &= d.need_affix.is_some_and(|n| fresh.contains(&n));
                 fresh.sort_unstable();
                 fresh.dedup();
                 fresh.retain(|&f| !has(&merged, f));
@@ -1058,6 +1062,9 @@ impl AffixDict {
             if !is_word {
                 i = j;
                 continue;
+            }
+            if !all_need && let Some(n) = d.need_affix {
+                merged.retain(|&f| f != n);
             }
             for &f in &carried {
                 if has(&merged, f) {
@@ -1383,7 +1390,7 @@ impl AffixDict {
             return false;
         }
         // A stem that needs an affix is no word on its own.
-        if self.stem_flags_except(w, excluded.and(self.need_affix)).is_some() || self.suffixed(w, None, false, excluded) {
+        if self.stem_flags_except(w, excluded.and(self.need_affix)).is_some() || self.suffixed(w, None, false, false, excluded) {
             return true;
         }
         let mut root = String::with_capacity(w.len() + 8);
@@ -1401,7 +1408,8 @@ impl AffixDict {
             // A circumfix prefix works only with its suffix, and one that needs another affix
             // only with a suffix too.
             let circ = self.cont_holds(r, self.circumfix);
-            if !circ && !self.cont_holds(r, self.need_affix) {
+            let needs = self.cont_holds(r, self.need_affix);
+            if !circ && !needs {
                 if self.stem_flags_except(&root, excluded).is_some_and(|f| has(f, r.flag)) {
                     return true;
                 }
@@ -1409,7 +1417,7 @@ impl AffixDict {
                     return true;
                 }
             }
-            if r.cross && self.suffixed(&root, Some(r.flag), circ, excluded) {
+            if r.cross && self.suffixed(&root, Some(r.flag), circ, needs, excluded) {
                 return true;
             }
         }
@@ -1453,12 +1461,16 @@ impl AffixDict {
         self.compound_rules.iter().any(|rule| compound_matches(rule, &mut part, n))
     }
 
-    /// Is `w` a stem with one suffix? With `need` set (a prefix was taken off), the stem must
-    /// carry that flag too and the suffix must allow cross products. `circ` says whether that
-    /// prefix is a circumfix one: the suffix must be one too, and otherwise must not be.
-    fn suffixed(&self, w: &str, need: Option<u16>, circ: bool, excluded: Excluded) -> bool {
-        // Fits the suffix rule `r`: circumfix alike, and not in need of another affix unless a prefix is there.
-        let fits = |r: &Rule| self.cont_holds(r, self.circumfix) == circ && (need.is_some() || !self.cont_holds(r, self.need_affix));
+    /// Is `w` a stem with one suffix? With `need` set (a prefix was taken off), the prefix's flag
+    /// must come from the stem or from the suffix's continuation classes (`leg` + `nagy` + `obb/A`)
+    /// and the suffix must allow cross products. `circ` says whether that prefix is a circumfix
+    /// one: the suffix must be one too, and otherwise must not be. `pfx_needs`: the prefix needs
+    /// another affix (NEEDAFFIX), so the suffix may not need one too (Hunspell rejects `reworks`
+    /// from `re/N` and `s/N`).
+    fn suffixed(&self, w: &str, need: Option<u16>, circ: bool, pfx_needs: bool, excluded: Excluded) -> bool {
+        // Fits the suffix rule `r`: circumfix alike, and in need of another affix only when a
+        // prefix that doesn't is there.
+        let fits = |r: &Rule| self.cont_holds(r, self.circumfix) == circ && (!self.cont_holds(r, self.need_affix) || (need.is_some() && !pfx_needs));
         let mut root = String::with_capacity(w.len() + 8);
         let mut flags: Vec<u16> = Vec::new();
         // Each split point from the end: the appended string is `w[b..]`, at most the longest
@@ -1475,8 +1487,13 @@ impl AffixDict {
                 // The stem path: `root` is a stem carrying the rule's flag (and the prefix's,
                 // when a cross product is being checked).
                 if let Some(f) = self.stem_flags_except(&root, excluded)
-                    && need.is_none_or(|n| has(f, n))
-                    && rules().any(|r| has(f, r.flag) && (need.is_none() || r.cross) && fits(r) && r.cond_matches(&root, true))
+                    && rules().any(|r| {
+                        has(f, r.flag)
+                            && need.is_none_or(|n| has(f, n) || self.cont_holds(r, Some(n)))
+                            && (need.is_none() || r.cross)
+                            && fits(r)
+                            && r.cond_matches(&root, true)
+                    })
                 {
                     return true;
                 }
@@ -1486,8 +1503,10 @@ impl AffixDict {
                 // classes that walk would only repeat the stem path above.
                 if need.is_none() && self.has_cont {
                     flags.clear();
-                    // Only a flag some continuation class holds can come from another rule.
-                    flags.extend(rules().filter(|r| self.is_cont_flag(r.flag) && fits(r) && r.cond_matches(&root, true)).map(|r| r.flag));
+                    // Only a flag some continuation class holds can come from another rule. The
+                    // outer suffix of a chain has another affix under it, so its NEEDAFFIX is met,
+                    // and Hunspell ignores its CIRCUMFIX there (`workables` from `s/c`).
+                    flags.extend(rules().filter(|r| self.is_cont_flag(r.flag) && r.cond_matches(&root, true)).map(|r| r.flag));
                     flags.sort_unstable();
                     flags.dedup();
                     if !flags.is_empty() && self.form_has_flag(&root, &flags, INNER_CHAIN, excluded) {
@@ -1544,8 +1563,10 @@ impl AffixDict {
         if !self.need_affix.is_some_and(|n| has(f, n)) {
             out.push(stem.to_string());
         }
-        // Suffix forms a prefix may be added to, with whether they are circumfix ones.
-        let mut cross_sfx: Vec<(String, bool)> = Vec::new();
+        // Suffix forms a prefix may be added to: the form, whether its suffix is a circumfix one,
+        // whether it needs another affix, and its continuation classes (which may allow a prefix
+        // the stem doesn't).
+        let mut cross_sfx: Vec<(String, bool, bool, u32)> = Vec::new();
         // Suffix forms queued with the continuation classes they carry, for chained expansion;
         // each (form, classes) pair is expanded once.
         let mut chain: Vec<(String, u32)> = Vec::new();
@@ -1562,7 +1583,7 @@ impl AffixDict {
             let form = format!("{base}{}", r.add);
             let circ = self.cont_holds(r, self.circumfix);
             if r.cross {
-                cross_sfx.push((form.clone(), circ));
+                cross_sfx.push((form.clone(), circ, self.cont_holds(r, self.need_affix), r.cont));
             }
             // A circumfix suffix needs its prefix, so what it ends is never chained without one.
             if r.cont != 0 && !circ && queued.insert((form.clone(), r.cont)) {
@@ -1601,11 +1622,9 @@ impl AffixDict {
                     if r.cont != 0 && queued.insert((next.clone(), r.cont)) {
                         chain.push((next.clone(), r.cont));
                     }
-                    // A circumfix suffix or one that needs another affix is no word on its own,
-                    // but a form it ends can still carry further suffixes.
-                    if !self.cont_holds(r, self.circumfix) && !self.cont_holds(r, self.need_affix) {
-                        out.extend(non_empty(next));
-                    }
+                    // The outer suffix of a chain has an affix under it, so its NEEDAFFIX is met,
+                    // and Hunspell ignores its CIRCUMFIX there (`workables` from `s/c`).
+                    out.extend(non_empty(next));
                     if out.len() >= MAX_FORMS {
                         return out;
                     }
@@ -1613,21 +1632,22 @@ impl AffixDict {
             }
         }
         for r in &self.prefixes {
-            if !has(f, r.flag) {
-                continue;
-            }
+            let on_stem = has(f, r.flag);
             let circ = self.cont_holds(r, self.circumfix);
-            if !circ && !self.cont_holds(r, self.need_affix) {
+            let needs = self.cont_holds(r, self.need_affix);
+            if on_stem && !circ && !needs {
                 out.extend(self.prefixed(r, stem));
             }
             if r.cross {
                 // Every suffix form looked at counts against the work budget, matching or not.
-                for (s, s_circ) in &cross_sfx {
+                for (s, s_circ, s_needs, s_cont) in &cross_sfx {
                     work += 1;
                     if out.len() >= MAX_FORMS || work > MAX_FORMS_WORK {
                         return out;
                     }
-                    if *s_circ != circ {
+                    // The prefix's flag comes from the stem or the suffix's continuation classes;
+                    // circumfix alike; not both in need of another affix.
+                    if !(on_stem || has(self.set(*s_cont), r.flag)) || *s_circ != circ || (needs && *s_needs) {
                         continue;
                     }
                     out.extend(self.prefixed(r, s));
@@ -2522,6 +2542,210 @@ pub(crate) mod tests {
         assert!(d.check("foo") && !d.check("bar") && !d.check("foobar"));
     }
 
+    /// craft-libs#488 review: NEEDAFFIX, CIRCUMFIX and FULLSTRIP as Hunspell 1.7.5 reads them.
+    /// Each case is a reviewer's repro `.aff`/`.dic`; the right and wrong words are the `hunspell`
+    /// CLI's answers on the same files (black-box) for every prefix/stem/suffix combination of
+    /// them, and `forms()` lists exactly the right ones.
+    #[test]
+    fn needaffix_circumfix_and_fullstrip_match_hunspell() {
+        const CASES: &[(&str, &str, &str, &str)] = &[
+            // rv488-hs/circ
+            (
+                "SET UTF-8\nCIRCUMFIX c\nPFX P Y 1\nPFX P 0 ne/c .\nSFX S Y 1\nSFX S 0 y/c .\nSFX T Y 1\nSFX T 0 z .\n",
+                "1\nstrom/PST\n",
+                "nestromy strom stromz",
+                "nenestrom nenestromy nenestromyy nenestromyz nenestromz nenestromzy nenestromzz nestrom nestromyy nestromyz nestromz nestromzy nestromzz stromy stromyy stromyz stromzy stromzz",
+            ),
+            // rv488-hs/circ_chain
+            (
+                "SET UTF-8\nCIRCUMFIX c\nPFX P Y 1\nPFX P 0 ne/c .\nSFX A Y 1\nSFX A 0 able/Bc .\nSFX B Y 1\nSFX B 0 s .\n",
+                "1\nwork/AP\n",
+                "neworkable work",
+                "nenework neneworkable neneworkableable neneworkables neneworks neneworksable neneworkss nework neworkableable neworks neworksable neworkss workable workableable workables works worksable workss",
+            ),
+            // rv488-hs/circN
+            (
+                "SET UTF-8\nCIRCUMFIX c\nNEEDAFFIX N\nPFX P Y 1\nPFX P 0 ne/cN .\nSFX S Y 1\nSFX S 0 y/c .\n",
+                "1\nstrom/PS\n",
+                "nestromy strom",
+                "nenestrom nenestromy nenestromyy nestrom nestromyy stromy stromyy",
+            ),
+            // rv488-hs/circ_nocross
+            (
+                "SET UTF-8\nCIRCUMFIX c\nPFX P Y 1\nPFX P 0 ne/c .\nSFX S N 1\nSFX S 0 y/c .\n",
+                "1\nstrom/PS\n",
+                "strom",
+                "nenestrom nenestromy nenestromyy nestrom nestromy nestromyy stromy stromyy",
+            ),
+            // rv488-hs/comp
+            ("SET UTF-8\nNEEDAFFIX N\nCOMPOUNDRULE 1\nCOMPOUNDRULE ab\n", "2\nfoo/a\nbar/bN\n", "foo", "bar"),
+            // rv488-hs/full
+            ("SET UTF-8\nFULLSTRIP\nSFX A Y 1\nSFX A ab x .\nPFX B Y 1\nPFX B ab y .\n", "1\nab/AB\n", "ab x y", ""),
+            // rv488-hs/full_pfxsfx
+            ("SET UTF-8\nFULLSTRIP\nCIRCUMFIX c\nPFX P Y 1\nPFX P ab y/c .\nSFX S Y 1\nSFX S ab z/c .\n", "1\nab/PS\n", "ab", "y z"),
+            // rv488-hs/homo2
+            ("SET UTF-8\nNEEDAFFIX N\nSFX A Y 1\nSFX A 0 s .\n", "2\nfoo/NA\nfoo\n", "foo foos", "fooss"),
+            // rv488-hs/homo
+            ("SET UTF-8\nNEEDAFFIX N\nSFX A Y 1\nSFX A 0 s .\n", "2\nfoo/NA\nfoo/B\n", "foo foos", "fooss"),
+            // rv488-hs/pfxna
+            (
+                "SET UTF-8\nNEEDAFFIX N\nPFX P Y 1\nPFX P 0 re/N .\nSFX S Y 1\nSFX S 0 s/N .\n",
+                "1\nwork/PS\n",
+                "work",
+                "rerework rereworks rereworkss rework reworks reworkss works workss",
+            ),
+            // rv488-hs/pfxstem
+            ("SET UTF-8\nNEEDAFFIX N\nPFX P Y 1\nPFX P 0 re .\n", "1\nbaz/NP\n", "rebaz", "baz rerebaz"),
+            // rv488-hs/pN_s
+            (
+                "SET UTF-8\nNEEDAFFIX N\nPFX P Y 1\nPFX P 0 re/N .\nSFX S Y 1\nSFX S 0 s .\n",
+                "1\nwork/PS\n",
+                "reworks work works",
+                "rerework rereworks rereworkss rework reworkss workss",
+            ),
+            // rv488-hs/p_sN
+            (
+                "SET UTF-8\nNEEDAFFIX N\nPFX P Y 1\nPFX P 0 re .\nSFX S Y 1\nSFX S 0 s/N .\n",
+                "1\nwork/PS\n",
+                "rework reworks work",
+                "rerework rereworks rereworkss reworkss works workss",
+            ),
+            // rv488-hs/sN_chain
+            ("SET UTF-8\nNEEDAFFIX N\nSFX B Y 1\nSFX B 0 x/AN .\nSFX A Y 1\nSFX A 0 s .\n", "1\nbar/B\n", "bar barxs", "bars barss barsx barx barxx"),
+            // rv488-hs/sNnocross
+            (
+                "SET UTF-8\nNEEDAFFIX N\nPFX P Y 1\nPFX P 0 re .\nSFX S N 1\nSFX S 0 s/N .\n",
+                "1\nwork/PS\n",
+                "rework work",
+                "rerework rereworks rereworkss reworks reworkss works workss",
+            ),
+            // rv488-hs/stemN_ps
+            (
+                "SET UTF-8\nNEEDAFFIX N\nPFX P Y 1\nPFX P 0 re .\nSFX S Y 1\nSFX S 0 s .\n",
+                "1\nwork/PSN\n",
+                "rework reworks works",
+                "rerework rereworks rereworkss reworkss work workss",
+            ),
+            // rv488-hs/zeroaff
+            ("SET UTF-8\nNEEDAFFIX N\nSFX A Y 1\nSFX A 0 0 .\n", "1\nfoo/NA\n", "foo", ""),
+            // rv488-second2/t11
+            (
+                "SET UTF-8\nFULLSTRIP\nSFX A Y 1\nSFX A ab x .\nPFX B Y 1\nPFX B ab y .\nSFX C Y 1\nSFX C 0 z .\n",
+                "1\nab/ABC\n",
+                "ab abz x y yz",
+                "abzz xz yzz",
+            ),
+            // rv488-second2/t12
+            ("SET UTF-8\nFULLSTRIP\nSFX A Y 1\nSFX A x 0 .\nPFX P Y 1\nPFX P 0 q .\n", "1\nx/AP\n", "q qx x", "qq qqx"),
+            // rv488-second2/t13
+            ("SET UTF-8\nFULLSTRIP\nSFX A Y 1\nSFX A x 0/B .\nSFX B Y 1\nSFX B 0 y .\n", "1\nx/A\n", "x y", "xy xyy"),
+            // rv488-second2/t1
+            ("SET UTF-8\nNEEDAFFIX N\nSFX A Y 1\nSFX A 0 s .\n", "2\nfoo/N\nfoo/A\n", "foo foos", "fooss"),
+            // rv488-second2/t2
+            (
+                "SET UTF-8\nCIRCUMFIX X\nPFX A Y 1\nPFX A 0 leg/X .\nPFX B Y 1\nPFX B 0 legesleg/X .\nSFX C Y 3\nSFX C 0 obb .\nSFX C 0 obb/AX .\nSFX C 0 obb/BX .\n",
+                "1\nnagy/C\n",
+                "legeslegnagyobb legnagyobb nagy nagyobb",
+                "legesleglegeslegnagy legesleglegeslegnagyobb legesleglegeslegnagyobbobb legesleglegnagy legesleglegnagyobb legesleglegnagyobbobb legeslegnagy legeslegnagyobbobb leglegeslegnagy leglegeslegnagyobb leglegeslegnagyobbobb leglegnagy leglegnagyobb leglegnagyobbobb legnagy legnagyobbobb nagyobbobb",
+            ),
+            // rv488-second2/t30
+            (
+                "SET UTF-8\nNEEDAFFIX N\nPFX P Y 1\nPFX P 0 re .\nSFX B Y 1\nSFX B 0 x/N .\n",
+                "1\nbar/BP\n",
+                "bar rebar rebarx",
+                "barx barxx rebarxx rerebar rerebarx rerebarxx",
+            ),
+            // rv488-second2/t31
+            (
+                "SET UTF-8\nCIRCUMFIX c\nPFX P Y 1\nPFX P 0 ne .\nPFX Q Y 1\nPFX Q 0 qe/c .\nSFX S Y 1\nSFX S 0 y/c .\nSFX T Y 1\nSFX T 0 z .\n",
+                "1\nstrom/PQST\n",
+                "nestrom nestromz qestromy strom stromz",
+                "nenestrom nenestromy nenestromyy nenestromyz nenestromz nenestromzy nenestromzz neqestrom neqestromy neqestromyy neqestromyz neqestromz neqestromzy neqestromzz nestromy nestromyy nestromyz nestromzy nestromzz qenestrom qenestromy qenestromyy qenestromyz qenestromz qenestromzy qenestromzz qeqestrom qeqestromy qeqestromyy qeqestromyz qeqestromz qeqestromzy qeqestromzz qestrom qestromyy qestromyz qestromz qestromzy qestromzz stromy stromyy stromyz stromzy stromzz",
+            ),
+            // rv488-second2/t32
+            (
+                "SET UTF-8\nNEEDAFFIX N\nPFX P Y 1\nPFX P 0 re/N .\nSFX B Y 1\nSFX B 0 x/N .\n",
+                "1\nbar/BP\n",
+                "bar",
+                "barx barxx rebar rebarx rebarxx rerebar rerebarx rerebarxx",
+            ),
+            // rv488-second2/t3
+            (
+                "SET UTF-8\nPFX A Y 1\nPFX A 0 leg .\nSFX C Y 1\nSFX C 0 obb/A .\n",
+                "1\nnagy/C\n",
+                "legnagyobb nagy nagyobb",
+                "leglegnagy leglegnagyobb leglegnagyobbobb legnagy legnagyobbobb nagyobbobb",
+            ),
+            // rv488-second2/t4
+            (
+                "SET UTF-8\nCIRCUMFIX X\nPFX A Y 1\nPFX A 0 leg/X .\nSFX C Y 2\nSFX C 0 obb .\nSFX C 0 obb/X .\n",
+                "1\nnagy/AC\n",
+                "legnagyobb nagy nagyobb",
+                "leglegnagy leglegnagyobb leglegnagyobbobb legnagy legnagyobbobb nagyobbobb",
+            ),
+            // rv488-second2/t5
+            (
+                "SET UTF-8\nNEEDAFFIX N\nPFX A Y 1\nPFX A 0 leg/N .\nSFX C Y 1\nSFX C 0 obb/A .\n",
+                "1\nnagy/C\n",
+                "legnagyobb nagy nagyobb",
+                "leglegnagy leglegnagyobb leglegnagyobbobb legnagy legnagyobbobb nagyobbobb",
+            ),
+            // rv488-second2/t6
+            (
+                "SET UTF-8\nNEEDAFFIX N\nPFX A Y 1\nPFX A 0 leg .\nSFX C Y 1\nSFX C 0 obb/AN .\n",
+                "1\nnagy/C\n",
+                "legnagyobb nagy",
+                "leglegnagy leglegnagyobb leglegnagyobbobb legnagy legnagyobbobb nagyobb nagyobbobb",
+            ),
+            // rv488-second2/t7
+            (
+                "SET UTF-8\nNEEDAFFIX N\nSFX A Y 1\nSFX A 0 able/B .\nSFX B Y 1\nSFX B 0 s/N .\n",
+                "1\nwork/A\n",
+                "work workable workables",
+                "workableable works worksable workss",
+            ),
+            // rv488-second2/t8
+            (
+                "SET UTF-8\nNEEDAFFIX N\nPFX P Y 1\nPFX P 0 re .\nSFX Z Y 1\nSFX Z 0 0 .\nSFX S Y 1\nSFX S 0 s .\n",
+                "2\nfoo/NPS\nbar/NZ\n",
+                "bar foos refoo refoos",
+                "bars barss foo fooss rebar rebars rebarss refooss rerebar rerebars rerebarss rerefoo rerefoos rerefooss",
+            ),
+            // rv488-second2/t9
+            (
+                "SET UTF-8\nCIRCUMFIX c\nPFX P Y 1\nPFX P 0 ne/c .\nSFX A Y 1\nSFX A 0 able/B .\nSFX B Y 1\nSFX B 0 s/c .\n",
+                "1\nwork/AP\n",
+                "work workable workables",
+                "nenework neneworkable neneworkableable neneworkables neneworks neneworksable neneworkss nework neworkable neworkableable neworkables neworks neworksable neworkss workableable works worksable workss",
+            ),
+        ];
+        for (aff, dic, right, wrong) in CASES {
+            let d = AffixDict::from_hunspell(aff, dic, &[]).unwrap();
+            for w in right.split_whitespace() {
+                assert!(d.check(w), "{w} is right:\n{aff}{dic}");
+            }
+            for w in wrong.split_whitespace() {
+                assert!(!d.check(w), "{w} is wrong:\n{aff}{dic}");
+            }
+            let mut forms: Vec<String> = dic.lines().skip(1).flat_map(|l| d.forms(l.split('/').next().unwrap_or(""))).collect();
+            forms.sort();
+            forms.dedup();
+            let mut want: Vec<&str> = right.split_whitespace().collect();
+            want.sort_unstable();
+            assert_eq!(forms, want, "forms():\n{aff}{dic}");
+        }
+    }
+
+    /// A circumfix prefix with two suffixes (`ne` + `work` + `able/Bc` + `s`): Hunspell 1.7.5
+    /// takes `neworkables`; this engine allows a prefix with one suffix only.
+    #[test]
+    #[ignore = "prefix + two suffixes is not supported (craft-libs#488 review P3)"]
+    fn a_circumfix_prefix_with_a_suffix_chain() {
+        let aff = "SET UTF-8\nCIRCUMFIX c\nPFX P Y 1\nPFX P 0 ne/c .\nSFX A Y 1\nSFX A 0 able/Bc .\nSFX B Y 1\nSFX B 0 s .\n";
+        let d = AffixDict::from_hunspell(aff, "1\nwork/AP\n", &[]).unwrap();
+        assert!(d.check("neworkables"));
+    }
+
     #[test]
     fn hostile_compound_rules_are_refused_or_cheap() {
         for bad in ["COMPOUNDRULE *a", "COMPOUNDRULE (ab)", "COMPOUNDRULE a**", "COMPOUNDMIN x", "ONLYINCOMPOUND ab"] {
@@ -3120,9 +3344,9 @@ x/12
         assert!(back.contains("nestromy") && !back.contains("stromy") && !back.contains("nestrom"));
     }
 
-    /// A chained suffix form is listed only when the checker accepts it: not when its last suffix
-    /// needs another affix or is a circumfix one, and not when it would replace a whole stem
-    /// without `FULLSTRIP`.
+    /// A chained suffix form is listed when the checker accepts it: also when its last suffix
+    /// needs another affix or is a circumfix one (as hunspell 1.7.5 reads a chain), not when it
+    /// would replace a whole stem without `FULLSTRIP`.
     #[test]
     fn chained_forms_follow_needaffix_circumfix_and_fullstrip() {
         let chain = |aff: &str, dic: &str, stem: &str| {
@@ -3136,11 +3360,13 @@ x/12
             (d, forms)
         };
         let (d, forms) = chain("SET UTF-8\nNEEDAFFIX N\nSFX A Y 1\nSFX A 0 able/B .\nSFX B Y 1\nSFX B 0 s/N .\n", "1\nwork/A\n", "work");
-        assert_eq!(forms, ["work", "workable"]);
-        assert!(!d.contains("workables"), "its last suffix needs another affix");
+        // The last suffix's NEEDAFFIX is met by the one under it (hunspell 1.7.5 takes it).
+        assert_eq!(forms, ["work", "workable", "workables"]);
+        assert!(d.contains("workables"), "its last suffix has another affix under it");
         let (d, forms) = chain("SET UTF-8\nCIRCUMFIX c\nSFX A Y 1\nSFX A 0 able/B .\nSFX B Y 1\nSFX B 0 s/c .\n", "1\nwork/A\n", "work");
-        assert_eq!(forms, ["work", "workable"]);
-        assert!(!d.contains("workables"), "its last suffix is a circumfix one");
+        // Hunspell 1.7.5 ignores a chain's last suffix's CIRCUMFIX: `workables` is right.
+        assert_eq!(forms, ["work", "workable", "workables"]);
+        assert!(d.contains("workables"), "a chain's last suffix needs no prefix");
         let aff = "SFX A Y 1\nSFX A 0 y/B .\nSFX B Y 1\nSFX B xy z .\n";
         let (d, forms) = chain(&format!("SET UTF-8\n{aff}"), "1\nx/A\n", "x");
         assert_eq!(forms, ["x", "xy"]);
