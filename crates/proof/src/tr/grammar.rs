@@ -10,6 +10,7 @@
 //!   `ne ... ne` conjunctions should not have commas immediately before or after them.
 //! - **Doubled punctuation** (`..`, `,,`, `;;`).
 
+use super::suggest::turkish_to_lower;
 use crate::{Issue, IssueKind, ProofLang, words};
 
 /// Turkish reduplications and emphatic word pairings that are intentionally repeated.
@@ -120,8 +121,8 @@ const ALLOWED_REPEATS: &[&str] = &[
 /// Turkish abbreviations that end with a period and after which lower case may continue.
 const ABBREVIATIONS: &[&str] = &[
     "vb", "vs", "vd", "bkz", "bknz", "ör", "örnek", "mad", "md", "s", "sf", "sn", "dk", "sa", "yy", "m", "km", "cm", "mm", "gr", "kg", "mg", "dr",
-    "prof", "doç", "yrd", "av", "ist", "ank", "izm", "cad", "sok", "mah", "apt", "no", "tel", "faks", "tl", "kr", "krş", "a.ş", "ltd", "şti", "t.c",
-    "tbmm", "meb", "möt", "mö", "ms",
+    "prof", "doç", "yrd", "av", "ist", "ank", "izm", "cad", "sok", "mah", "apt", "no", "tel", "faks", "tl", "kr", "krş", "ltd", "şti", "tbmm", "meb",
+    "möt", "mö", "ms",
 ];
 
 /// Conjunctions that must not be preceded by a comma.
@@ -152,9 +153,11 @@ pub fn check_with(text: &str, capital_first: bool) -> Vec<Issue> {
             None => continue,
         };
         let only_spaces = gap.chars().all(|c| c == ' ' || c == '\t');
-        let lower1 = w1.to_lowercase();
-        let lower2 = w2.to_lowercase();
-        if only_spaces && w1.chars().all(char::is_alphabetic) && lower1 == lower2 && !ALLOWED_REPEATS.contains(&lower1.as_str()) {
+        let lower1 = turkish_to_lower(w1);
+        let lower2 = turkish_to_lower(w2);
+        // Words, not numbers or codes (`1 1`, `A1 A1`); `Ankara'da Ankara'da` is one.
+        let word = w1.chars().any(char::is_alphabetic) && !w1.chars().any(|c| c.is_numeric());
+        if only_spaces && word && lower1 == lower2 && !ALLOWED_REPEATS.contains(&lower1.as_str()) {
             v.push(Issue {
                 start: pair[1].0,
                 end: pair[1].1,
@@ -226,7 +229,7 @@ pub fn check_with(text: &str, capital_first: bool) -> Vec<Issue> {
     // 3. Comma before or after conjunctions (`ali, ve veli` or `ve, veli`)
     for (i, &(w_start, w_end)) in ws.iter().enumerate() {
         let word = match text.get(w_start..w_end) {
-            Some(w) => w.to_lowercase(),
+            Some(w) => turkish_to_lower(w),
             None => continue,
         };
         // Check comma before conjunction
@@ -293,11 +296,14 @@ pub fn check_with(text: &str, capital_first: bool) -> Vec<Issue> {
             // number before a period is an ordinal (`5. sınıf`, `21. yüzyıl`).
             let spaced = gap.rfind(['.', '?', '!']).and_then(|m| gap.get(m + 1..)).is_some_and(|rest| rest.contains(char::is_whitespace));
             let ordinal = trimmed.ends_with('.') && prev_word.chars().any(|c| c.is_ascii_digit());
+            // An initial (`A.Ş.`, `T.C.`, `M. Kemal`) ends no sentence.
+            let initial = trimmed.starts_with('.') && prev_word.chars().count() == 1;
             if (trimmed.ends_with('.') || trimmed.ends_with('?') || trimmed.ends_with('!'))
                 && spaced
                 && !ordinal
+                && !initial
                 && !trimmed.contains("...")
-                && !ABBREVIATIONS.contains(&prev_word.to_lowercase().as_str())
+                && !ABBREVIATIONS.contains(&turkish_to_lower(prev_word).as_str())
                 && let Some(w) = text.get(w_start..w_end)
                 && w.chars().next().is_some_and(char::is_lowercase)
             {
@@ -407,6 +413,18 @@ mod tests {
     fn a_comma_after_de_ne_or_ya_is_fine() {
         for text in ["Ali de, Veli de geldi.", "Ne, sen mi geldin?", "Ya, bilmiyorum.", "Bu mesele de, haklı olan bizdik."] {
             assert!(check(text).is_empty(), "{text}: {:?}", check(text));
+        }
+    }
+
+    /// craft-libs#495 review: initials (`A.Ş.`, `T.C.`) and `İst.` end no sentence, and Turkish
+    /// case folding finds `Işık ışık`; a word with an apostrophe is still a repeat.
+    #[test]
+    fn turkish_case_and_initials() {
+        for text in ["Şirket A.Ş. bugün açıldı.", "O T.C. vatandaşı.", "Adres İst. caddesi."] {
+            assert!(check(text).is_empty(), "{text}: {:?}", check(text));
+        }
+        for text in ["Işık ışık yandı.", "Ankara'da Ankara'da kaldık."] {
+            assert_eq!(check(text).iter().filter(|i| i.message == "Yinelenen sözcük").count(), 1, "{text}");
         }
     }
 
