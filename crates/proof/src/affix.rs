@@ -23,10 +23,11 @@
 //! Compounds by `COMPOUNDRULE` (patterns of flags with `*` and `?`, as SCOWL's English
 //! dictionaries use for ordinals: `21st`, `112th`; with long or numeric flags each flag is written
 //! in parentheses, `(aa)*(bb)`), with `ONLYINCOMPOUND` and `COMPOUNDMIN`; the parts of such a
-//! compound are stems, without affixes, as in Hunspell.
-//! Morphological data (`AM` aliases, the fields after a stem) is skipped. Rejected: flag-based
-//! compounding (`COMPOUNDFLAG`, `COMPOUNDBEGIN`…) and the other directives that change which
-//! words are correct.
+//! compound are stems, without affixes, as in Hunspell. Flag-based compounds (`COMPOUNDFLAG`,
+//! `COMPOUNDBEGIN`/`MIDDLE`/`END`, `COMPOUNDPERMITFLAG`, `COMPOUNDFORBIDFLAG`, `COMPOUNDWORDMAX`,
+//! the `CHECKCOMPOUND…` checks, `FORCEUCASE`…): see [`compound`].
+//! Morphological data (`AM` aliases, the fields after a stem) is skipped. Rejected: the other
+//! directives that change which words are correct (`COMPLEXPREFIXES`, `COMPOUNDMORESUFFIXES`…).
 //!
 //! Each distinct flag gets a dense `u16` id; a stem's flags and a rule's continuation classes are
 //! a sorted set of ids, interned once in a flat table, so membership is a binary search in a few
@@ -39,6 +40,8 @@ use std::collections::HashMap;
 use std::hash::Hasher;
 
 use crate::patterns::{FxHasher, FxMap};
+
+mod compound;
 
 const MAGIC: &str = "WCAFF1";
 /// Most bytes the compact format inflates to, written or read.
@@ -79,17 +82,7 @@ const MAX_SET_DATA: usize = 1 << 23;
 const MAX_DISTINCT_FLAGS: usize = 1 << 16;
 
 /// Directives that change which words are correct in ways this engine doesn't implement.
-const UNSUPPORTED: &[&str] = &[
-    "COMPLEXPREFIXES",
-    "COMPOUNDBEGIN",
-    "COMPOUNDEND",
-    "COMPOUNDFIRST",
-    "COMPOUNDFLAG",
-    "COMPOUNDLAST",
-    "COMPOUNDMIDDLE",
-    "COMPOUNDPERMITFLAG",
-    "PSEUDOROOT",
-];
+const UNSUPPORTED: &[&str] = &["COMPLEXPREFIXES", "PSEUDOROOT"];
 
 /// Most `COMPOUNDRULE` patterns kept, and most tokens in one: a hostile `.aff` can't make a
 /// compound check cost more than a few thousand stem lookups per word.
@@ -113,7 +106,29 @@ enum Repeat {
 fn parse_compound_rule(pattern: &str, mode: FlagMode) -> Result<Vec<(FlagKey, Repeat)>, String> {
     let mut out: Vec<(FlagKey, Repeat)> = Vec::new();
     let mut chars = pattern.chars().filter(|&c| c != EMOJI_SELECTOR);
+    // With long or numeric flags, what isn't a flag in parentheses (the Mongolian dictionary
+    // writes such rules) is read as the CLI answers (black-box): a bracketed list (`[a0,a1]`) is
+    // skipped with its `*` or `?`, and a punctuation mark (`%?`, `.`) makes a rule that matches
+    // nothing (a token no stem carries).
+    let mut skipped = false;
     while let Some(c) = chars.next() {
+        if mode != FlagMode::Char {
+            let skip = match c {
+                '[' => {
+                    if !chars.by_ref().any(|c| c == ']') {
+                        return Err(format!("COMPOUNDRULE `{pattern}`: `[` is not closed"));
+                    }
+                    true
+                }
+                '*' | '?' => skipped,
+                c if !c.is_alphanumeric() && !matches!(c, '(' | ')') => return Ok(vec![(FlagKey::MAX, Repeat::Once)]),
+                _ => false,
+            };
+            skipped = skip;
+            if skip {
+                continue;
+            }
+        }
         match c {
             '*' | '?' => {
                 let Some(last) = out.last_mut().filter(|t| t.1 == Repeat::Once) else {
@@ -133,6 +148,9 @@ fn parse_compound_rule(pattern: &str, mode: FlagMode) -> Result<Vec<(FlagKey, Re
                 let key = mode.parse_one(&inner).map_err(|e| format!("COMPOUNDRULE `{pattern}`: {e}"))?;
                 out.push((key, Repeat::Once));
             }
+            // In one-character mode a `)` that closes no group is a flag (Swedish: `)k`), as the
+            // CLI reads it.
+            ')' if mode == FlagMode::Char => out.push((FlagKey::from(c), Repeat::Once)),
             ')' => return Err(format!("COMPOUNDRULE `{pattern}`: `)` closes no group")),
             c if mode == FlagMode::Char => out.push((FlagKey::from(c), Repeat::Once)),
             _ => return Err(format!("COMPOUNDRULE `{pattern}`: long and numeric flags are written in ( )")),
@@ -257,6 +275,9 @@ struct SfxGroup {
     rules: Vec<u32>,
     /// The rules of `rules` with continuation classes: the only ones a chain can go through.
     cont_rules: Vec<u32>,
+    /// The rules of `rules` whose flag some continuation class holds: the only ones that can be
+    /// the outer suffix of two in a row.
+    outer_rules: Vec<u32>,
 }
 
 /// A stem list with affix rules (see the module docs).
@@ -334,6 +355,12 @@ pub struct AffixDict {
     /// `COMPOUNDRULE`), so a word starting otherwise is no compound: SCOWL's ordinals start with
     /// a digit, and a misspelled word costs one lookup here instead of one per cut.
     compound_firsts: Vec<char>,
+    /// Flag-based compounding (`COMPOUNDFLAG`…), if the dictionary compounds by flags.
+    cpd: Option<Box<compound::Compounding>>,
+    /// Appended string → the prefix rules adding it, in rule order.
+    pfx_index: FxMap<Box<str>, Vec<u32>>,
+    /// Longest appended prefix, in chars.
+    max_pfx_chars: usize,
 }
 
 /// An `ICONV` or `OCONV` table: `(from, to)` pairs in source order, found by the first character
@@ -492,6 +519,8 @@ struct Rules {
     only_in_compound: Option<FlagKey>,
     /// `COMPOUNDMIN`: the shortest part of a compound, in characters (Hunspell's default is 3).
     compound_min: Option<usize>,
+    /// Flag-based compounding directives.
+    cpd: compound::Raw,
     /// `AF` flag aliases: alias `n` (1-based) stands for `aliases[n - 1]`.
     aliases: Vec<String>,
     /// The `AF` table opened with its count line, so flag fields are alias numbers. A table
@@ -749,12 +778,22 @@ impl FlagMode {
 /// `SUBSTANDARD` (suggestions), `KEEPCASE` (case variants of a word) or `NEEDAFFIX` (a stem on
 /// its own).
 #[derive(Clone, Copy, Debug, Default)]
-struct Excluded([Option<u16>; 5]);
+struct Excluded([Option<u16>; 5], bool);
 
 impl Excluded {
     /// Does the flag set `set` carry an excluded flag?
     fn hits(self, set: &[u16]) -> bool {
         self.0.iter().flatten().any(|f| has(set, *f))
+    }
+
+    /// These exclusions, and no flag-based compounds (`MAXCPDSUGS 0` for suggestions).
+    fn without_compounds(mut self) -> Excluded {
+        self.1 = true;
+        self
+    }
+
+    fn no_compounds(self) -> bool {
+        self.1
     }
 
     /// These exclusions and `flag` too.
@@ -809,16 +848,8 @@ fn intersects(a: &[u16], b: &[u16]) -> bool {
     small.iter().any(|f| has(large, *f))
 }
 
-/// Directives an English dictionary may carry that this engine doesn't implement but that don't
-/// change which English words are right, ignored by [`AffixDict::from_hunspell_english`]:
-/// flag-based compounding (English dictionaries compound only ordinals, by `COMPOUNDRULE`, which
-/// is read). Output conversion (`OCONV`) is read, for English as for every language: suggestions
-/// are written as the dictionary says (`don’t`).
-const IGNORED_IN_ENGLISH: &[&str] =
-    &["COMPOUNDBEGIN", "COMPOUNDEND", "COMPOUNDFIRST", "COMPOUNDFLAG", "COMPOUNDLAST", "COMPOUNDMIDDLE", "COMPOUNDPERMITFLAG"];
-
-/// Read Hunspell `.aff` text (already decoded to UTF-8). `english`: ignore the directives in
-/// [`IGNORED_IN_ENGLISH`] instead of refusing them.
+/// Read Hunspell `.aff` text (already decoded to UTF-8). `english`: ignore the
+/// flag-based compounding directives (see [`compound::is_directive`]).
 fn parse_aff(aff: &str, english: bool) -> Result<Rules, String> {
     let mut r = Rules::default();
     let mut cross: HashMap<(bool, FlagKey), bool> = HashMap::new();
@@ -836,8 +867,8 @@ fn parse_aff(aff: &str, english: bool) -> Result<Rules, String> {
         }
         let at = |k: usize| f.get(k).copied().unwrap_or("");
         match dir {
-            "SET" | "LANG" | "NAME" | "VERSION" | "HOME" | "WORDCHARS" | "MAXNGRAMSUGS" | "MAXDIFF" | "ONLYMAXDIFF" | "NOSPLITSUGS"
-            | "SUGSWITHDOTS" | "WARN" | "FORBIDWARN" | "MAXCPDSUGS" => {}
+            "SET" | "NAME" | "VERSION" | "HOME" | "WORDCHARS" | "MAXNGRAMSUGS" | "MAXDIFF" | "ONLYMAXDIFF" | "SUGSWITHDOTS" | "WARN"
+            | "FORBIDWARN" => {}
             // Morphological aliases, and a flag that only matters for morphological generation:
             // the words it marks are correct.
             "AM" | "LEMMA_PRESENT" => {}
@@ -935,9 +966,16 @@ fn parse_aff(aff: &str, english: bool) -> Result<Rules, String> {
                     r.prefixes.push(rule);
                 }
             }
-            d if english && IGNORED_IN_ENGLISH.contains(&d) => {}
+            // English dictionaries compound only ordinals, by `COMPOUNDRULE` (read above): their
+            // flag-based compounding directives don't change which English words are right.
+            d if english && compound::is_directive(d) => {}
             d if UNSUPPORTED.contains(&d) => return Err(format!("line {}: {d} is not supported", n + 1)),
-            _ => {}
+            _ => {
+                let mut cpd = std::mem::take(&mut r.cpd);
+                let read = cpd.read(&f, &mut |x| r.one_flag(x));
+                r.cpd = cpd;
+                read.map_err(|e| format!("line {}: {e}", n + 1))?;
+            }
         }
     }
     // Aliases may be declared after the rules that use them; resolve once all are read.
@@ -1075,7 +1113,8 @@ impl AffixDict {
         // NEEDAFFIX and CIRCUMFIX flags may only ever appear in rules' continuation classes.
         let directives =
             [rules.forbidden, rules.no_suggest, rules.substandard, rules.keepcase, rules.only_in_compound, rules.need_affix, rules.circumfix];
-        for k in all.chain(directives.into_iter().flatten()) {
+        let cpd_keys = rules.cpd.keys(mode)?;
+        for k in all.chain(directives.into_iter().flatten()).chain(cpd_keys) {
             distinct.entry(k).or_insert(0);
             if distinct.len() > MAX_DISTINCT_FLAGS {
                 return Err(format!("more than {MAX_DISTINCT_FLAGS} distinct flags"));
@@ -1122,6 +1161,7 @@ impl AffixDict {
             compound_text: rules.compound_rules,
             only_in_compound: rules.only_in_compound.and_then(id_of),
             compound_min: rules.compound_min.unwrap_or(3),
+            cpd: rules.cpd.build(mode, &id_of)?,
             ..AffixDict::default()
         };
         d.offs.push(0);
@@ -1142,6 +1182,10 @@ impl AffixDict {
             // NEEDAFFIX belongs to its homonym: the word stands alone if any homonym does
             // (`foo/NA` and `foo/B`: `foo` is right).
             let mut all_need = true;
+            // So does ONLYINCOMPOUND: a homonym with neither stands alone (German `schulen/DIXY`
+            // beside `schulen/Sozm`), but `buch/Sozm` beside `buch/hke` (NEEDAFFIX) doesn't, as
+            // in the CLI.
+            let mut alone = false;
             let mut j = i;
             while let Some((w, a, b, entry_is_word)) = stems.get(j)
                 && w == word
@@ -1159,6 +1203,7 @@ impl AffixDict {
                 }
                 is_word = true;
                 all_need &= d.need_affix.is_some_and(|n| fresh.contains(&n));
+                alone |= !d.only_in_compound.is_some_and(|o| fresh.contains(&o)) && !d.need_affix.is_some_and(|n| fresh.contains(&n));
                 fresh.sort_unstable();
                 fresh.dedup();
                 fresh.retain(|&f| !has(&merged, f));
@@ -1182,6 +1227,9 @@ impl AffixDict {
             }
             if !all_need && let Some(n) = d.need_affix {
                 merged.retain(|&f| f != n);
+            }
+            if alone {
+                merged.retain(|&f| Some(f) != d.only_in_compound && Some(f) != d.need_affix);
             }
             for &f in &carried {
                 if has(&merged, f) {
@@ -1285,6 +1333,14 @@ impl AffixDict {
             }
         }
         self.sfx_by_flag = by_flag;
+        let mut pfx_index: FxMap<Box<str>, Vec<u32>> = FxMap::default();
+        for (i, r) in self.prefixes.iter().enumerate() {
+            if let Ok(i) = u32::try_from(i) {
+                pfx_index.entry(r.add.clone()).or_default().push(i);
+            }
+        }
+        self.pfx_index = pfx_index;
+        self.max_pfx_chars = self.prefixes.iter().map(|r| r.add.chars().count()).max().unwrap_or(0);
         let mut cont_flag = vec![false; self.flag_keys.len()];
         for r in self.prefixes.iter().chain(&self.suffixes) {
             for &f in self.set(r.cont) {
@@ -1294,6 +1350,10 @@ impl AffixDict {
             }
         }
         self.has_cont = cont_flag.contains(&true);
+        for g in idx.values_mut().flatten() {
+            let outer = |i: &&u32| self.suffixes.get(**i as usize).is_some_and(|r| cont_flag.get(usize::from(r.flag)).copied().unwrap_or(false));
+            g.outer_rules = g.rules.iter().filter(outer).copied().collect();
+        }
         self.cont_flag = cont_flag;
         self.max_sfx_chars = self.suffixes.iter().map(|r| r.add.chars().count()).max().unwrap_or(0);
         self.sfx_index = idx;
@@ -1366,7 +1426,12 @@ impl AffixDict {
     /// suggestions.
     fn excluded(&self, suggestible: bool) -> Excluded {
         let e = Excluded::default().and(self.forbidden);
-        if suggestible { e.and(self.no_suggest).and(self.substandard) } else { e }
+        if !suggestible {
+            return e;
+        }
+        let e = e.and(self.no_suggest).and(self.substandard);
+        // `MAXCPDSUGS 0`: compounds are right but never suggested.
+        if self.cpd.as_ref().is_some_and(|c| c.no_suggestions) { e.without_compounds() } else { e }
     }
 
     /// Flag set of a stem, if `w` is one.
@@ -1382,8 +1447,19 @@ impl AffixDict {
         self.stem_set(w).filter(|set| !excluded.hits(set) && !self.only_in_compound.is_some_and(|f| has(set, f)))
     }
 
+    /// Is `w` listed with `FORBIDDENWORD`? Then it is no word, however else it could be built
+    /// (affixes, compounds), as in Hunspell.
+    fn is_forbidden(&self, w: &str) -> bool {
+        self.forbidden.is_some_and(|f| self.stem_set(w).is_some_and(|set| has(set, f)))
+    }
+
     /// Flag set of the stem `w`, whatever flags it carries.
     fn stem_set(&self, w: &str) -> Option<&[u16]> {
+        self.stem_lookup(w).map(|(_, set)| set)
+    }
+
+    /// Index and flag set of the stem `w`, whatever flags it carries.
+    fn stem_lookup(&self, w: &str) -> Option<(u32, &[u16])> {
         if self.table.is_empty() {
             return None;
         }
@@ -1395,7 +1471,7 @@ impl AffixDict {
                 return None;
             }
             if self.word(t as usize) == Some(w) {
-                return Some(self.set(*self.flags.get(t as usize)?));
+                return Some((t, self.set(*self.flags.get(t as usize)?)));
             }
             slot = (slot + 1) & mask;
         }
@@ -1444,7 +1520,7 @@ impl AffixDict {
                 inner.clear();
                 for r in g.cont_rules.iter().filter_map(|&i| self.suffixes.get(i as usize)) {
                     let meets = *seen.entry(r.cont).or_insert_with(|| probe.meets(self.set(r.cont)));
-                    if meets && !self.cont_holds(r, self.circumfix) && r.cond_matches(&root, true) {
+                    if meets && !self.cont_holds(r, self.circumfix) && !self.cont_holds(r, self.only_in_compound) && r.cond_matches(&root, true) {
                         inner.push(r.flag);
                     }
                 }
@@ -1489,7 +1565,20 @@ impl AffixDict {
     /// [`AffixDict::contains`] on normalized input, where stems carrying an `excluded` flag
     /// don't count (forbidden words; case variants of `KEEPCASE` stems).
     fn contains_except(&self, w: &str, excluded: Excluded) -> bool {
-        if w.is_empty() || w.len() > MAX_WORD_BYTES {
+        self.contains_in(w, excluded, matches!(casing(w), Casing::Initial | Casing::Upper))
+    }
+
+    /// [`AffixDict::contains_except`], where `capitalized` says whether the word as written
+    /// starts with a capital (`w` may be its lower-case form): a compound whose last part has
+    /// `FORCEUCASE` is right only then.
+    fn contains_in(&self, w: &str, excluded: Excluded, capitalized: bool) -> bool {
+        self.simple_word(w, excluded) || self.compound(w, excluded) || self.flag_compound(w, excluded, capitalized)
+    }
+
+    /// Is `w` a stem or an affixed form of one (no compound)? Affixes that are only valid inside
+    /// a compound (`ONLYINCOMPOUND`) don't count.
+    fn simple_word(&self, w: &str, excluded: Excluded) -> bool {
+        if w.is_empty() || w.len() > MAX_WORD_BYTES || self.is_forbidden(w) {
             return false;
         }
         // A stem that needs an affix is no word on its own.
@@ -1497,9 +1586,17 @@ impl AffixDict {
             return true;
         }
         let mut root = String::with_capacity(w.len() + 8);
-        for r in &self.prefixes {
+        // The prefix rules whose appended text starts `w`, found by that text (one hash lookup per
+        // length) rather than by trying every rule.
+        let ends = std::iter::once(0).chain(w.char_indices().map(|(i, c)| i + c.len_utf8()));
+        let rules = ends
+            .take(self.max_pfx_chars + 1)
+            .filter_map(|b| self.pfx_index.get(w.get(..b)?))
+            .flatten()
+            .filter_map(|&i| self.prefixes.get(i as usize));
+        for r in rules {
             let Some(rest) = w.strip_prefix(&*r.add) else { continue };
-            if rest.is_empty() && !self.full_strip {
+            if (rest.is_empty() && !self.full_strip) || self.cont_holds(r, self.only_in_compound) {
                 continue;
             }
             root.clear();
@@ -1524,7 +1621,7 @@ impl AffixDict {
                 return true;
             }
         }
-        self.compound(w, excluded)
+        false
     }
 
     /// Is `w` a compound of two or more stems (no affixes) whose flags spell out one of the
@@ -1536,7 +1633,7 @@ impl AffixDict {
         if self.compound_rules.is_empty()
             || w.len() > MAX_COMPOUND_BYTES
             || !w.chars().next().is_some_and(|c| self.compound_firsts.contains(&c))
-            || self.forbidden.is_some_and(|f| self.stem_set(w).is_some_and(|set| has(set, f)))
+            || self.is_forbidden(w)
         {
             return false;
         }
@@ -1573,7 +1670,11 @@ impl AffixDict {
     fn suffixed(&self, w: &str, need: Option<u16>, circ: bool, pfx_needs: bool, excluded: Excluded) -> bool {
         // Fits the suffix rule `r`: circumfix alike, and in need of another affix only when a
         // prefix that doesn't is there.
-        let fits = |r: &Rule| self.cont_holds(r, self.circumfix) == circ && (!self.cont_holds(r, self.need_affix) || (need.is_some() && !pfx_needs));
+        let fits = |r: &Rule| {
+            self.cont_holds(r, self.circumfix) == circ
+                && (!self.cont_holds(r, self.need_affix) || (need.is_some() && !pfx_needs))
+                && !self.cont_holds(r, self.only_in_compound)
+        };
         let mut root = String::with_capacity(w.len() + 8);
         let mut flags: Vec<u16> = Vec::new();
         // Each split point from the end: the appended string is `w[b..]`, at most the longest
@@ -1609,7 +1710,11 @@ impl AffixDict {
                     // Only a flag some continuation class holds can come from another rule. The
                     // outer suffix of a chain has another affix under it, so its NEEDAFFIX is met,
                     // and Hunspell ignores its CIRCUMFIX there (`workables` from `s/c`).
-                    flags.extend(rules().filter(|r| self.is_cont_flag(r.flag) && r.cond_matches(&root, true)).map(|r| r.flag));
+                    flags.extend(
+                        rules()
+                            .filter(|r| self.is_cont_flag(r.flag) && !self.cont_holds(r, self.only_in_compound) && r.cond_matches(&root, true))
+                            .map(|r| r.flag),
+                    );
                     flags.sort_unstable();
                     flags.dedup();
                     if !flags.is_empty() && self.form_has_flag(&root, &flags, INNER_CHAIN, excluded) {
@@ -1656,12 +1761,12 @@ impl AffixDict {
                 let lower = w.to_lowercase();
                 // CHECKSHARPS: a KEEPCASE word with `ß` may be capitalized (`Gruß` for `Gruß/k`).
                 let ex = if self.check_sharps && lower.contains('ß') { excluded } else { keep };
-                self.contains_except(&lower, ex)
+                self.contains_in(&lower, ex, true)
             }
             Casing::Upper => {
                 let lower = w.to_lowercase();
                 self.contains_except(&capitalize(&lower), keep)
-                    || self.contains_except(&lower, keep)
+                    || self.contains_in(&lower, keep, true)
                     || (self.check_sharps && self.sharps(&lower, excluded))
             }
         }
@@ -1712,7 +1817,7 @@ impl AffixDict {
         let mut queued: std::collections::HashSet<(String, u32)> = std::collections::HashSet::new();
         let mut work = 0usize;
         for r in &self.suffixes {
-            if !has(f, r.flag) || !r.cond_matches(stem, true) {
+            if !has(f, r.flag) || !r.cond_matches(stem, true) || self.cont_holds(r, self.only_in_compound) {
                 continue;
             }
             let Some(base) = stem.strip_suffix(&*r.strip) else { continue };
@@ -1750,7 +1855,7 @@ impl AffixDict {
                     if work > MAX_FORMS_WORK {
                         break 'chain;
                     }
-                    if !r.cond_matches(&form, true) {
+                    if !r.cond_matches(&form, true) || self.cont_holds(r, self.only_in_compound) {
                         continue;
                     }
                     let Some(base) = form.strip_suffix(&*r.strip) else { continue };
@@ -1770,7 +1875,7 @@ impl AffixDict {
                 }
             }
         }
-        for r in &self.prefixes {
+        for r in self.prefixes.iter().filter(|r| !self.cont_holds(r, self.only_in_compound)) {
             let on_stem = has(f, r.flag);
             let circ = self.cont_holds(r, self.circumfix);
             let needs = self.cont_holds(r, self.need_affix);
@@ -1933,7 +2038,7 @@ impl AffixDict {
                 out.push('\n');
             }
         };
-        if self.compound_text.is_empty() {
+        if self.compound_text.is_empty() && self.cpd.is_none() {
             write_only_in_compound(&mut out);
         } else {
             out.push_str(&format!("COMPOUNDMIN {}\n", self.compound_min));
@@ -1941,6 +2046,9 @@ impl AffixDict {
             for p in &self.compound_text {
                 out.push_str(&format!("COMPOUNDRULE {p}\n"));
             }
+        }
+        if let Some(c) = &self.cpd {
+            c.write(&mut out, &|k, out: &mut String| self.flag_mode.write(std::iter::once(k), out));
         }
         let z = |s: &str| if s.is_empty() { "0".to_string() } else { s.to_string() };
         for (kind, rules) in [("PFX", &self.prefixes), ("SFX", &self.suffixes)] {
@@ -2033,6 +2141,12 @@ impl AffixDict {
                         return Err("affix dictionary: too many COMPOUNDRULE patterns".into());
                     }
                     rules.compound_rules.push(at(1).to_string());
+                }
+                d if compound::is_directive(d) => {
+                    let mut cpd = std::mem::take(&mut rules.cpd);
+                    let read = cpd.read(&f, &mut |x| rules.one_flag(x));
+                    rules.cpd = cpd;
+                    read.map_err(|e| format!("affix dictionary: bad `{line}`: {e}"))?;
                 }
                 "MAP" => rules.map.push(at(1).chars().collect()),
                 "REP" => rules.rep.push((at(1).replace('_', " "), at(2).replace('_', " "))),
@@ -3029,7 +3143,7 @@ pub(crate) mod tests {
     /// craft-libs#482 review: an English dictionary with compounding and output conversion, as the
     /// usual en_US and en_GB ones have, loads for English: `COMPOUNDRULE` makes its ordinals, its
     /// `ONLYINCOMPOUND` stems are words only inside them, `COMPOUNDFLAG` is ignored (other
-    /// languages still refuse it) and `OCONV` is applied to suggestions. (A synthetic `.aff`
+    /// languages read it) and `OCONV` is applied to suggestions. (A synthetic `.aff`
     /// written for this test.)
     #[test]
     fn english_dictionaries_ignore_compounding_and_output_conversion() {
@@ -3037,7 +3151,7 @@ pub(crate) mod tests {
                    COMPOUNDMIN 1\nONLYINCOMPOUND c\nCOMPOUNDRULE 2\nCOMPOUNDRULE n*1t\nCOMPOUNDRULE n*mp\nCOMPOUNDFLAG Z\n\
                    WORDCHARS 0123456789\nSFX S Y 1\nSFX S 0 s [^sxzhy]\nSFX D Y 1\nSFX D 0 ed [^ey]\n";
         let dic = "7\nhouse/S\nwalk/SD\n0th/pc\n1st/p\n1th/tc\n1/n1\nthe\n";
-        assert!(AffixDict::from_hunspell(aff, dic, &[]).is_err(), "refused for other languages");
+        assert!(AffixDict::from_hunspell(&format!("{aff}COMPOUNDMORESUFFIXES\n"), dic, &[]).is_err(), "refused with COMPOUNDFLAG");
         let d = AffixDict::from_hunspell_english(aff, dic, &[]).unwrap();
         for w in ["house", "houses", "walked", "walks", "the"] {
             assert!(d.check(w), "{w}");
@@ -3073,7 +3187,7 @@ pub(crate) mod tests {
         assert!(AffixDict::from_hunspell("FLAG long\n", DIC, &[]).is_ok());
         assert!(AffixDict::from_hunspell("FLAG num\n", DIC, &[]).is_ok());
         assert!(AffixDict::from_hunspell("FLAG bogus\n", DIC, &[]).is_err());
-        assert!(AffixDict::from_hunspell("COMPOUNDFLAG X\n", DIC, &[]).is_err());
+        assert!(AffixDict::from_hunspell("COMPOUNDFLAG X\nCHECKCOMPOUNDPATTERN 1\nCHECKCOMPOUNDPATTERN a b c\n", DIC, &[]).is_err());
         assert!(AffixDict::from_hunspell("SFX a Y 1\nSFX a 0 y [ab\n", DIC, &[]).is_err());
         assert!(AffixDict::from_bytes(b"not deflate").is_err());
         let ok = dict().to_bytes().unwrap();
