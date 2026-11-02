@@ -669,7 +669,7 @@ pub(crate) fn accepted_by_options(word: &str, opts: &Options) -> bool {
         || !w.chars().any(char::is_alphabetic)
         || (opts.ignore_numbers && w.chars().any(|c| c.is_ascii_digit()))
         // Only a word with a cased letter is in capitals: a Hebrew or Thai word has none.
-        || (opts.ignore_uppercase && w.chars().any(char::is_uppercase) && w.chars().all(|c| !c.is_lowercase()))
+        || (opts.ignore_uppercase && spelling::in_capitals(w))
         // The whole word: the languages split a hyphenated word into its parts, and an added
         // `Unigranrio-RJ` is none of them (#2082).
         || in_user_dictionary(&w.to_lowercase())
