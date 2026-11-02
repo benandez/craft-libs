@@ -6,6 +6,8 @@
 //! cargo run --release -p craft-proof --example affix_check -- check de_DE.aff de_DE.dic < words.txt
 //! # 2000 candidates (forms of random stems glued together, some with a letter changed), seed 7.
 //! cargo run --release -p craft-proof --example affix_check -- gen de_DE.aff de_DE.dic 2000 7 > words.txt
+//! # Single words instead: forms of random stems, and stems with another stem's ending.
+//! cargo run --release -p craft-proof --example affix_check -- single de_DE.aff de_DE.dic 2000 7 > words.txt
 //! ```
 //!
 //! The answers are compared with `hunspell -d <path without extension> -l` on the same words
@@ -83,6 +85,36 @@ fn generate(d: &AffixDict, n: usize, seed: u64) -> Vec<String> {
     out
 }
 
+/// Single words (no compounds): forms of random stems, and stems with another stem's ending
+/// (mostly wrong, some right: an ending the stem's own homonym allows or not).
+fn single(d: &AffixDict, n: usize, seed: u64) -> Vec<String> {
+    let stems: Vec<&str> = d.stems().filter(|s| s.chars().all(char::is_alphabetic)).collect();
+    let mut rng = Rng(seed.max(1));
+    let mut endings: Vec<String> = Vec::new();
+    for _ in 0..200 {
+        let s = stems.get(rng.below(stems.len())).copied().unwrap_or_default();
+        endings.extend(d.forms(s).iter().filter_map(|f| f.strip_prefix(s)).filter(|e| !e.is_empty()).map(str::to_string));
+    }
+    endings.sort();
+    endings.dedup();
+    let mut out = Vec::with_capacity(n);
+    while out.len() < n {
+        let s = stems.get(rng.below(stems.len())).copied().unwrap_or_default();
+        let forms = d.forms(s);
+        if let Some(f) = forms.get(rng.below(forms.len())) {
+            out.push(f.clone());
+        }
+        if let Some(e) = endings.get(rng.below(endings.len())) {
+            out.push(format!("{s}{e}"));
+        }
+        out.retain(|w| w.chars().all(char::is_alphabetic));
+    }
+    // Letters only: the other checker's command line splits words at anything else.
+    out.retain(|w| w.chars().all(char::is_alphabetic));
+    out.truncate(n);
+    out
+}
+
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
@@ -112,15 +144,16 @@ fn main() -> Result<(), String> {
             eprintln!("{} words in {took:?}", words.len());
             Ok(())
         }
-        [cmd, aff, dic, n, seed] if cmd == "gen" => {
+        [cmd, aff, dic, n, seed] if cmd == "gen" || cmd == "single" => {
             let d = load(aff, dic)?;
             let n: usize = n.parse().map_err(|_| "n is a number")?;
             let seed: u64 = seed.parse().map_err(|_| "seed is a number")?;
-            for w in generate(&d, n, seed) {
+            let words = if cmd == "gen" { generate(&d, n, seed) } else { single(&d, n, seed) };
+            for w in words {
                 println!("{w}");
             }
             Ok(())
         }
-        _ => Err("usage: affix_check check <aff> <dic> < words | affix_check gen <aff> <dic> <n> <seed>".into()),
+        _ => Err("usage: affix_check check <aff> <dic> < words | affix_check gen|single <aff> <dic> <n> <seed>".into()),
     }
 }

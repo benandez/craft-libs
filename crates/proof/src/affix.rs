@@ -43,6 +43,8 @@ use crate::patterns::{FxHasher, FxMap};
 
 mod compound;
 
+pub(crate) use compound::MAX_SUGGEST_COMPOUNDS;
+
 const MAGIC: &str = "WCAFF1";
 /// Most bytes the compact format inflates to, written or read.
 const MAX_INFLATED: usize = 64 << 20;
@@ -357,6 +359,11 @@ pub struct AffixDict {
     compound_firsts: Vec<char>,
     /// Flag-based compounding (`COMPOUNDFLAG`…), if the dictionary compounds by flags.
     cpd: Option<Box<compound::Compounding>>,
+    /// Stems with `ONLYINCOMPOUND` homonyms beside others: stem index → those homonyms' flags
+    /// (compound parts only), while `flags` holds the others'.
+    cpd_sets: FxMap<u32, u32>,
+    /// Those stems' sets with all their homonyms' flags, for `COMPOUNDRULE` parts.
+    rule_sets: FxMap<u32, u32>,
     /// Appended string → the prefix rules adding it, in rule order.
     pfx_index: FxMap<Box<str>, Vec<u32>>,
     /// Longest appended prefix, in chars.
@@ -488,6 +495,12 @@ pub fn capitalize(w: &str) -> String {
         Some(f) => f.to_uppercase().chain(c).collect(),
         None => String::new(),
     }
+}
+
+/// `w` with its first letter in lower case.
+fn decapitalize(w: &str) -> String {
+    let mut c = w.chars();
+    c.next().map(|f| f.to_lowercase().chain(c).collect()).unwrap_or_default()
 }
 
 /// Parsed rules and tables, shared by the Hunspell reader and the compact format.
@@ -777,8 +790,10 @@ impl FlagMode {
 /// Stem flags that rule a lookup out: `FORBIDDENWORD` always, and per lookup `NOSUGGEST` and
 /// `SUBSTANDARD` (suggestions), `KEEPCASE` (case variants of a word) or `NEEDAFFIX` (a stem on
 /// its own).
+/// The second field: no flag-based compounds; the third: a suggestion candidate, whose compound
+/// search gets a small budget ([`compound::MAX_SUGGEST_WORK`]).
 #[derive(Clone, Copy, Debug, Default)]
-struct Excluded([Option<u16>; 5], bool);
+struct Excluded([Option<u16>; 5], bool, bool);
 
 impl Excluded {
     /// Does the flag set `set` carry an excluded flag?
@@ -794,6 +809,20 @@ impl Excluded {
 
     fn no_compounds(self) -> bool {
         self.1
+    }
+
+    fn suggesting(self) -> bool {
+        self.2
+    }
+
+    /// These exclusions without `flag`.
+    fn without(mut self, flag: Option<u16>) -> Excluded {
+        for slot in &mut self.0 {
+            if *slot == flag {
+                *slot = None;
+            }
+        }
+        self
     }
 
     /// These exclusions and `flag` too.
@@ -840,6 +869,44 @@ impl<'a> FlagProbe<'a> {
 /// Does the sorted flag set `set` hold `flag`?
 fn has(set: &[u16], flag: u16) -> bool {
     set.binary_search(&flag).is_ok()
+}
+
+/// Add a homonym's sorted flags `fresh` to the sorted set `set`; `false` (and nothing added) when
+/// that would take it past [`MAX_FLAGS_PER_STEM`].
+fn merge_homonym(set: &mut Vec<u16>, fresh: &[u16]) -> bool {
+    let before = set.len();
+    let add: Vec<u16> = fresh.iter().copied().filter(|&f| !has(set, f)).collect();
+    if add.is_empty() {
+        // A repeated homonym adds nothing: no sort (200,000 duplicate lines of a stem with
+        // thousands of flags would each pay one).
+        return true;
+    }
+    if before.saturating_add(add.len()) > MAX_FLAGS_PER_STEM {
+        return false;
+    }
+    set.extend(add);
+    // A sorted run and a sorted tail: the stable sort merges them in linear time.
+    set.sort();
+    true
+}
+
+/// Put the exclusion flags `carried` (FORBIDDENWORD, NOSUGGEST, SUBSTANDARD of any homonym) back
+/// into the sorted set `set`, making room by dropping a flag that excludes nothing (there are at
+/// most three exclusion flags, so a full set always has one).
+fn carry_exclusions(set: &mut Vec<u16>, carried: &[u16], exclusions: &[u16]) {
+    for &f in carried {
+        if has(set, f) {
+            continue;
+        }
+        if set.len() >= MAX_FLAGS_PER_STEM
+            && let Some(at) = set.iter().rposition(|g| !exclusions.contains(g))
+        {
+            set.remove(at);
+        }
+        if let Err(at) = set.binary_search(&f) {
+            set.insert(at, f);
+        }
+    }
 }
 
 /// Do two sorted flag sets share a flag? (A binary search per flag of the smaller one.)
@@ -1172,20 +1239,25 @@ impl AffixDict {
         let mut i = 0;
         let mut dropped = 0usize;
         let mut merged: Vec<u16> = Vec::new();
+        let mut solo: Vec<u16> = Vec::new();
+        let mut only_set: Vec<u16> = Vec::new();
         let mut fresh: Vec<u16> = Vec::new();
         let mut carried: Vec<u16> = Vec::new();
         while i < stems.len() {
             let Some((word, ..)) = stems.get(i) else { break };
             merged.clear();
+            solo.clear();
+            only_set.clear();
             carried.clear();
             let mut is_word = false;
             // NEEDAFFIX belongs to its homonym: the word stands alone if any homonym does
             // (`foo/NA` and `foo/B`: `foo` is right).
             let mut all_need = true;
-            // So does ONLYINCOMPOUND: a homonym with neither stands alone (German `schulen/DIXY`
-            // beside `schulen/Sozm`), but `buch/Sozm` beside `buch/hke` (NEEDAFFIX) doesn't, as
-            // in the CLI.
-            let mut alone = false;
+            // So does ONLYINCOMPOUND, with its flags: beside homonyms without it, the homonyms
+            // with it are kept apart (`cpd_sets`), only for compound parts (German
+            // `schulen/DIXY` beside `schulen/Sozm`: `schulen` alone, but not `schulens`), as in
+            // the CLI.
+            let (mut solo_need, mut only_need, mut any_solo, mut any_only) = (true, true, false, false);
             let mut j = i;
             while let Some((w, a, b, entry_is_word)) = stems.get(j)
                 && w == word
@@ -1202,22 +1274,24 @@ impl AffixDict {
                     continue;
                 }
                 is_word = true;
-                all_need &= d.need_affix.is_some_and(|n| fresh.contains(&n));
-                alone |= !d.only_in_compound.is_some_and(|o| fresh.contains(&o)) && !d.need_affix.is_some_and(|n| fresh.contains(&n));
+                let need = d.need_affix.is_some_and(|n| fresh.contains(&n));
+                let only = d.only_in_compound.is_some_and(|o| fresh.contains(&o));
+                all_need &= need;
                 fresh.sort_unstable();
                 fresh.dedup();
-                fresh.retain(|&f| !has(&merged, f));
+                if only {
+                    any_only = true;
+                    only_need &= need;
+                    merge_homonym(&mut only_set, &fresh);
+                } else {
+                    any_solo = true;
+                    solo_need &= need;
+                    merge_homonym(&mut solo, &fresh);
+                }
                 // Homonyms can add up to more flags than one entry holds; past MAX_FLAGS_PER_STEM
                 // an entry's other flags are dropped (its exclusions are carried below), so the
                 // compact data never holds a set its reader refuses.
-                if fresh.is_empty() {
-                    // A repeated homonym adds nothing: no sort (200,000 duplicate lines of a
-                    // stem with thousands of flags would each pay one).
-                } else if merged.len().saturating_add(fresh.len()) <= MAX_FLAGS_PER_STEM {
-                    merged.extend_from_slice(&fresh);
-                    // A sorted run and a sorted tail: the stable sort merges them in linear time.
-                    merged.sort();
-                } else {
+                if !merge_homonym(&mut merged, &fresh) {
                     dropped += 1;
                 }
             }
@@ -1228,26 +1302,35 @@ impl AffixDict {
             if !all_need && let Some(n) = d.need_affix {
                 merged.retain(|&f| f != n);
             }
-            if alone {
-                merged.retain(|&f| Some(f) != d.only_in_compound && Some(f) != d.need_affix);
-            }
-            for &f in &carried {
-                if has(&merged, f) {
-                    continue;
+            let mixed = any_solo && any_only;
+            let cpd_id = if mixed {
+                for (set, all_need) in [(&mut solo, solo_need), (&mut only_set, only_need)] {
+                    if !all_need && let Some(n) = d.need_affix {
+                        set.retain(|&f| f != n);
+                    }
+                    carry_exclusions(set, &carried, &exclusions);
                 }
-                // Make room by dropping a flag that excludes nothing (there are at most three
-                // exclusion flags, so a full set always has one).
-                if merged.len() >= MAX_FLAGS_PER_STEM
-                    && let Some(at) = merged.iter().rposition(|g| !exclusions.contains(g))
-                {
-                    merged.remove(at);
+                // `COMPOUNDRULE` parts read all the homonyms' flags.
+                if !d.compound_rules.is_empty() {
+                    carry_exclusions(&mut merged, &carried, &exclusions);
+                    let all = d.intern(&mut set_ids, &mut merged)?;
+                    if let Ok(at) = u32::try_from(d.flags.len()) {
+                        d.rule_sets.insert(at, all);
+                    }
                 }
-                if let Err(at) = merged.binary_search(&f) {
-                    merged.insert(at, f);
-                }
+                std::mem::swap(&mut merged, &mut solo);
+                Some(d.intern(&mut set_ids, &mut only_set)?)
+            } else {
+                carry_exclusions(&mut merged, &carried, &exclusions);
+                None
+            };
+            if let Some(c) = cpd_id
+                && let Ok(at) = u32::try_from(d.flags.len())
+            {
+                d.cpd_sets.insert(at, c);
             }
             let id = d.intern(&mut set_ids, &mut merged)?;
-            if merged.iter().any(|f| compound_flags.contains(f))
+            if [Some(id), cpd_id].into_iter().flatten().any(|s| d.set(s).iter().any(|f| compound_flags.contains(f)))
                 && let Some(c) = word.chars().next()
                 && !d.compound_firsts.contains(&c)
             {
@@ -1429,7 +1512,8 @@ impl AffixDict {
         if !suggestible {
             return e;
         }
-        let e = e.and(self.no_suggest).and(self.substandard);
+        let mut e = e.and(self.no_suggest).and(self.substandard);
+        e.2 = true;
         // `MAXCPDSUGS 0`: compounds are right but never suggested.
         if self.cpd.as_ref().is_some_and(|c| c.no_suggestions) { e.without_compounds() } else { e }
     }
@@ -1546,6 +1630,18 @@ impl AffixDict {
         self.contains_except(&self.normalize(w), self.excluded(true))
     }
 
+    /// [`AffixDict::contains_suggestible`], without flag-based compounds when `compounds` is
+    /// false (suggestion candidates past the first [`compound::MAX_SUGGEST_COMPOUNDS`]).
+    pub(crate) fn contains_suggestible_with(&self, w: &str, compounds: bool) -> bool {
+        let e = self.excluded(true);
+        self.contains_except(&self.normalize(w), if compounds { e } else { e.without_compounds() })
+    }
+
+    /// Whether the dictionary compounds by flags (suggestion candidates then cost more).
+    pub(crate) fn flag_compounds(&self) -> bool {
+        self.cpd.is_some()
+    }
+
     /// `w` after the `ICONV` conversions (at each position the longest match wins) and without
     /// the `IGNORE` characters. Input longer than [`MAX_INPUT_BYTES`] is no word and comes back
     /// unchanged, so the length check after this rejects it without converting it.
@@ -1655,7 +1751,10 @@ impl AffixDict {
             let slot = parts.get_mut(a * n + b)?;
             *slot.get_or_insert_with(|| {
                 let (Some(&x), Some(&y)) = (cuts.get(a), cuts.get(b)) else { return None };
-                w.get(x..y).and_then(|p| self.stem_set(p)).filter(|set| !excluded.hits(set) && bare(set))
+                w.get(x..y)
+                    .and_then(|p| self.stem_lookup(p))
+                    .map(|(stem, set)| self.rule_sets.get(&stem).map_or(set, |&s| self.set(s)))
+                    .filter(|set| !excluded.hits(set) && bare(set))
             })
         };
         self.compound_rules.iter().any(|rule| compound_matches(rule, &mut part, n))
@@ -1756,7 +1855,10 @@ impl AffixDict {
         }
         let keep = excluded.and(self.keepcase);
         match casing(&w) {
-            Casing::Lower | Casing::Mixed => false,
+            Casing::Lower => false,
+            // A compound may join a capitalized stem to others, and the word start with a
+            // capital (`FooQux` from `foo` and `Qux`: right in the CLI).
+            Casing::Mixed => w.chars().next().is_some_and(char::is_uppercase) && self.flag_compound(&decapitalize(&w), excluded, true),
             Casing::Initial => {
                 let lower = w.to_lowercase();
                 // CHECKSHARPS: a KEEPCASE word with `ß` may be capitalized (`Gruß` for `Gruß/k`).
@@ -1995,7 +2097,7 @@ impl AffixDict {
         // In one-character mode a directive flag that no stem or rule uses isn't written, as
         // before flag ids existed, so those dictionaries' compact data stays byte for byte the same.
         let used = |flag: u16| {
-            self.flags.iter().any(|&id| self.set(id).contains(&flag))
+            self.flags.iter().chain(self.cpd_sets.values()).any(|&id| self.set(id).contains(&flag))
                 || self.prefixes.iter().chain(&self.suffixes).any(|r| r.flag == flag || self.set(r.cont).contains(&flag))
         };
         if self.full_strip {
@@ -2082,6 +2184,15 @@ impl AffixDict {
                 raw.extend_from_slice(flags.as_bytes());
             }
             raw.push(b'\n');
+            // The ONLYINCOMPOUND homonyms' flags: the same stem again, merged back on reading.
+            if let Some(&c) = u32::try_from(i).ok().and_then(|i| self.cpd_sets.get(&i)) {
+                raw.push(b.len().min(255) as u8);
+                raw.extend_from_slice(b.get(b.len().min(255)..).unwrap_or_default());
+                let mut flags = String::from("/");
+                self.write_flags(self.set(c), &mut flags);
+                raw.extend_from_slice(flags.as_bytes());
+                raw.push(b'\n');
+            }
             prev = b;
         }
         // What [`AffixDict::from_bytes`] would refuse to inflate is refused here.

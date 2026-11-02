@@ -125,6 +125,8 @@ struct Collector<'a> {
     names: bool,
     /// May half of a missing space be one ([`Tuning::strict_case`])?
     split_names: bool,
+    /// Candidates checked with compounds so far (at most `MAX_SUGGEST_COMPOUNDS`).
+    compound_checks: usize,
 }
 
 impl Collector<'_> {
@@ -144,14 +146,16 @@ impl Collector<'_> {
         let mut words = Vec::new();
         let mut cost = cost;
         let names = if cand.contains(' ') { self.split_names } else { self.names };
+        let compounds = self.d.flag_compounds() && self.compound_checks < crate::affix::MAX_SUGGEST_COMPOUNDS;
+        self.compound_checks += usize::from(compounds);
         for part in cand.split(' ') {
-            if self.d.contains_suggestible(part) {
+            if self.d.contains_suggestible_with(part, compounds) {
                 words.push(part.to_string());
             } else if !names {
                 return;
             } else {
                 let c = capitalize(part);
-                if !self.d.contains_suggestible(&c) {
+                if !self.d.contains_suggestible_with(&c, compounds) {
                     return;
                 }
                 words.push(c);
@@ -308,7 +312,8 @@ pub(crate) fn suggest_in(d: &AffixDict, word: &str, max: usize, t: &Tuning) -> V
     let chars: Vec<char> = input.chars().collect();
     let names = !t.strict_case || case != Casing::Lower;
     let split_names = !t.strict_case;
-    let mut col = Collector { d, input: input.clone(), tested: HashMap::new(), found: HashMap::new(), seq: 0, names, split_names };
+    let mut col =
+        Collector { d, input: input.clone(), tested: HashMap::new(), found: HashMap::new(), seq: 0, names, split_names, compound_checks: 0 };
     add_case(&mut col, word, &input);
     let map = groups(d, t);
     add_map_slips(&mut col, &chars, &map, t);
@@ -640,8 +645,16 @@ mod tests {
     #[test]
     fn a_cheaper_later_offer_wins() {
         let d = AffixDict::from_hunspell("", "1\ncafe\n", &[]).unwrap();
-        let mut col =
-            Collector { d: &d, input: "cafè".into(), tested: HashMap::new(), found: HashMap::new(), seq: 0, names: true, split_names: true };
+        let mut col = Collector {
+            d: &d,
+            input: "cafè".into(),
+            tested: HashMap::new(),
+            found: HashMap::new(),
+            seq: 0,
+            names: true,
+            split_names: true,
+            compound_checks: 0,
+        };
         col.offer("cafe", COST_DROP_DIACRITIC);
         col.offer("cafe", COST_REP);
         col.offer("cafe", COST_SCAN);
