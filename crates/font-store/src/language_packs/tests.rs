@@ -387,6 +387,10 @@ fn a_corrupt_record_is_rebuilt_from_the_folders() {
     // Still listed, with the name from its pack.toml.
     let listed = store.installed_language_packs();
     assert_eq!(listed.iter().map(|p| (p.locale.as_str(), p.name.as_str())).collect::<Vec<_>>(), [("nl", "Test")]);
+    // craft-libs#486 review: listing holds no store lock, so it never writes the record (it
+    // could race an install); the next install or removal repairs it.
+    assert_eq!(std::fs::read(&record).unwrap(), b"{ not json");
+    assert!(!store.dir().join("language-packs.json.bad").exists());
     // Installing another keeps it.
     std::fs::write(&record, b"{ not json").unwrap();
     let de = pack_archive("de", "zzde");
@@ -401,8 +405,8 @@ fn a_corrupt_record_is_rebuilt_from_the_folders() {
     // A missing record with pack folders is rebuilt too.
     std::fs::remove_file(&record).unwrap();
     assert_eq!(store.installed_language_packs().len(), 2);
+    assert!(!record.exists(), "listing writes nothing");
     let nl_again = PackEntry { url: format!("{RELEASE}nl.tar.zst"), ..nl.clone() };
-    std::fs::remove_file(&record).unwrap();
     store.install_pack_from(false, &index, &nl_again, &Cancel::new(), &mut |_| {}).unwrap();
     assert_eq!(store.installed_language_packs().len(), 2, "de kept when the record was missing");
     // Removing works on a rebuilt record too.

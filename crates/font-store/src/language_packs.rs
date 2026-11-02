@@ -418,7 +418,10 @@ impl FontStore {
     /// The installed Language packs whose folder is there, by locale.
     pub fn installed_language_packs(&self) -> Vec<InstalledLanguagePack> {
         let dir = self.language_packs_dir();
-        let installed = self.read_installed().unwrap_or_else(|_| self.installed_from_disk());
+        // Read only: without the store lock this never writes the record (an install or removal
+        // may be under way); a record that can't be read is listed from the folders and repaired
+        // by the next install or removal, which hold the lock.
+        let installed = self.read_record().unwrap_or_else(|| self.installed_from_disk());
         installed
             .packs
             .into_iter()
@@ -462,7 +465,7 @@ impl FontStore {
     fn read_installed(&self) -> Result<Installed, Error> {
         let path = self.dir().join(INSTALLED);
         let there = std::fs::symlink_metadata(&path).is_ok();
-        if there && let Some(i) = read_limited(&path, MAX_PACK_INDEX_BYTES).and_then(|b| serde_json::from_slice::<Installed>(&b).ok()) {
+        if let Some(i) = self.read_record() {
             return Ok(i);
         }
         let rebuilt = self.installed_from_disk();
@@ -475,6 +478,11 @@ impl FontStore {
         }
         self.write_installed(&rebuilt)?;
         Ok(rebuilt)
+    }
+
+    /// The record as written, if there is one that can be read.
+    fn read_record(&self) -> Option<Installed> {
+        read_limited(&self.dir().join(INSTALLED), MAX_PACK_INDEX_BYTES).and_then(|b| serde_json::from_slice::<Installed>(&b).ok())
     }
 
     /// The installed packs as their folders say: each folder named by a locale, with the name
