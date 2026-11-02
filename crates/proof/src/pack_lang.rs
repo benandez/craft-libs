@@ -7,8 +7,9 @@
 //! [`in_one_check`] call, so a paragraph in many languages loads each dictionary once. Locales
 //! with no dictionary are remembered apart and take no room.
 //!
-//! A word none of whose letters the dictionary's words use (a Cyrillic word in a Dutch run) isn't
-//! this language's: it is never marked, as Word leaves a word in another script alone.
+//! A word none of whose letters is in a script the dictionary's words are written in (a Cyrillic
+//! word in a Dutch run) isn't this language's: it is never marked, as Word leaves a word in another
+//! script alone. A word in the dictionary's script is always checked, whatever its letters.
 
 use std::cell::Cell;
 use std::path::PathBuf;
@@ -25,8 +26,6 @@ pub(crate) const MAX_LOADED_BYTES: u64 = 256 << 20;
 const BYTES_PER_FILE_BYTE: u64 = 6;
 /// Most locales remembered as having no dictionary (the oldest is forgotten first when full).
 const MAX_MISSING: usize = 256;
-/// Most distinct letters kept in a dictionary's alphabet ([`alphabet`]).
-const MAX_ALPHABET: usize = 4096;
 
 /// The budget in force (tests lower it).
 static BUDGET: AtomicU64 = AtomicU64::new(MAX_LOADED_BYTES);
@@ -41,8 +40,8 @@ thread_local! {
 struct Loaded {
     locale: PackLocale,
     dict: Arc<AffixDict>,
-    /// The lowercase letters its words use ([`alphabet`]), sorted.
-    alphabet: Arc<[char]>,
+    /// The scripts its words are written in ([`scripts`]), sorted.
+    scripts: Arc<[u32]>,
     /// The `.dic` it came from.
     file: Option<PathBuf>,
     /// Estimated memory.
@@ -100,21 +99,61 @@ fn remember_missing(missing: &mut Vec<PackLocale>, locale: PackLocale) {
     missing.push(locale);
 }
 
-/// The lowercase letters the words of `d` use, sorted (at most [`MAX_ALPHABET`]).
-fn alphabet(d: &AffixDict) -> Arc<[char]> {
+/// The script of the letter `c`, as a number: the main alphabetic scripts by their Unicode blocks
+/// (Latin with its extensions, Greek, Cyrillic, Armenian, Hebrew, Arabic, Georgian, Hangul, kana,
+/// Han, Ethiopic); any other letter by its 128-character block. Only told apart, never named.
+fn script_of(c: char) -> u32 {
+    const SCRIPTS: &[(u32, u32, u32)] = &[
+        (0x0041, 0x024F, 1),
+        (0x0250, 0x02AF, 1),
+        (0x1E00, 0x1EFF, 1),
+        (0x2C60, 0x2C7F, 1),
+        (0xA720, 0xA7FF, 1),
+        (0xAB30, 0xAB6F, 1),
+        (0xFF21, 0xFF5A, 1),
+        (0x0370, 0x03FF, 2),
+        (0x1F00, 0x1FFF, 2),
+        (0x0400, 0x052F, 3),
+        (0x1C80, 0x1C8F, 3),
+        (0x2DE0, 0x2DFF, 3),
+        (0xA640, 0xA69F, 3),
+        (0x0530, 0x058F, 4),
+        (0xFB13, 0xFB17, 4),
+        (0x0590, 0x05FF, 5),
+        (0xFB1D, 0xFB4F, 5),
+        (0x0600, 0x06FF, 6),
+        (0x0750, 0x077F, 6),
+        (0x08A0, 0x08FF, 6),
+        (0xFB50, 0xFDFF, 6),
+        (0xFE70, 0xFEFF, 6),
+        (0x10A0, 0x10FF, 7),
+        (0x1C90, 0x1CBF, 7),
+        (0x2D00, 0x2D2F, 7),
+        (0x1100, 0x11FF, 8),
+        (0x3130, 0x318F, 8),
+        (0xAC00, 0xD7AF, 8),
+        (0x3040, 0x30FF, 9),
+        (0x3400, 0x4DBF, 10),
+        (0x4E00, 0x9FFF, 10),
+        (0x1200, 0x139F, 11),
+    ];
+    let u = u32::from(c);
+    SCRIPTS.iter().find(|(lo, hi, _)| (*lo..=*hi).contains(&u)).map_or(0x100 + (u >> 7), |(_, _, s)| *s)
+}
+
+/// The scripts the words of `d` are written in ([`script_of`] of their letters), sorted.
+fn scripts(d: &AffixDict) -> Arc<[u32]> {
     let mut seen = std::collections::BTreeSet::new();
-    for c in d.stems().flat_map(str::chars).filter(|c| c.is_alphabetic()).flat_map(char::to_lowercase) {
-        if seen.len() >= MAX_ALPHABET {
-            break;
-        }
-        seen.insert(c);
+    for c in d.stems().flat_map(str::chars).filter(|c| c.is_alphabetic()) {
+        seen.insert(script_of(c));
     }
     seen.into_iter().collect()
 }
 
-/// Is `word` in another script than `alphabet`'s words: none of its letters is in it?
-fn other_script(word: &str, alphabet: &[char]) -> bool {
-    !alphabet.is_empty() && !word.chars().filter(|c| c.is_alphabetic()).flat_map(char::to_lowercase).any(|c| alphabet.binary_search(&c).is_ok())
+/// Is `word` in another script than the dictionary's (`scripts`): none of its letters is in one
+/// of them? A word in the dictionary's script is never, whatever its letters (`zzzz` in Dutch).
+fn other_script(word: &str, scripts: &[u32]) -> bool {
+    !scripts.is_empty() && !word.chars().filter(|c| c.is_alphabetic()).any(|c| scripts.binary_search(&script_of(c)).is_ok())
 }
 
 #[cfg(test)]
@@ -189,19 +228,19 @@ pub(crate) fn names(locale: PackLocale) -> Vec<String> {
 
 /// `locale`'s dictionary, loaded on first use; an empty one when there is none.
 fn get(locale: PackLocale) -> (Arc<AffixDict>, Option<PathBuf>) {
-    let (d, file, _) = get_with_alphabet(locale);
+    let (d, file, _) = get_with_scripts(locale);
     (d, file)
 }
 
-/// [`get`], with the dictionary's [`alphabet`].
-fn get_with_alphabet(locale: PackLocale) -> (Arc<AffixDict>, Option<PathBuf>, Arc<[char]>) {
+/// [`get`], with the dictionary's [`scripts`].
+fn get_with_scripts(locale: PackLocale) -> (Arc<AffixDict>, Option<PathBuf>, Arc<[u32]>) {
     let reloads = {
         let mut c = CACHE.write().unwrap_or_else(PoisonError::into_inner);
         c.clock = c.clock.wrapping_add(1);
         let now = c.clock;
         if let Some(l) = c.loaded.iter_mut().find(|l| l.locale == locale) {
             l.used = now;
-            return (l.dict.clone(), l.file.clone(), l.alphabet.clone());
+            return (l.dict.clone(), l.file.clone(), l.scripts.clone());
         }
         if c.missing.contains(&locale) {
             return (Arc::default(), None, Arc::from([]));
@@ -209,14 +248,14 @@ fn get_with_alphabet(locale: PackLocale) -> (Arc<AffixDict>, Option<PathBuf>, Ar
         c.reloads
     };
     let (dict, file, bytes) = load(locale);
-    let alphabet = alphabet(&dict);
+    let scripts = scripts(&dict);
     let mut c = CACHE.write().unwrap_or_else(PoisonError::into_inner);
     if c.reloads != reloads || c.loaded.iter().any(|l| l.locale == locale) || c.missing.contains(&locale) {
-        return (dict, file, alphabet);
+        return (dict, file, scripts);
     }
     if dict.is_empty() {
         remember_missing(&mut c.missing, locale);
-        return (dict, file, alphabet);
+        return (dict, file, scripts);
     }
     LOADS.fetch_add(1, Ordering::Relaxed);
     let budget = BUDGET.load(Ordering::Relaxed);
@@ -231,8 +270,8 @@ fn get_with_alphabet(locale: PackLocale) -> (Arc<AffixDict>, Option<PathBuf>, Ar
         total = total.saturating_sub(gone.bytes);
     }
     let used = c.clock;
-    c.loaded.push(Loaded { locale, dict: dict.clone(), alphabet: alphabet.clone(), file: file.clone(), bytes, used });
-    (dict, file, alphabet)
+    c.loaded.push(Loaded { locale, dict: dict.clone(), scripts: scripts.clone(), file: file.clone(), bytes, used });
+    (dict, file, scripts)
 }
 
 /// Load `locale`'s dictionary, with its estimated memory.
@@ -273,12 +312,12 @@ pub(crate) fn load_error(locale: PackLocale) -> Option<String> {
 
 /// Is `word` right in `locale`? Every word is when there is no dictionary.
 pub(crate) fn is_correct(word: &str, locale: PackLocale, opts: &crate::Options) -> bool {
-    let (d, _, alphabet) = get_with_alphabet(locale);
+    let (d, _, scripts) = get_with_scripts(locale);
     if d.is_empty() {
         return true;
     }
     let Some(w) = crate::spelling::word_to_check_in(&d, word, opts) else { return true };
-    if other_script(w, &alphabet) {
+    if other_script(w, &scripts) {
         return true;
     }
     let known = |w: &str| d.check(w) || crate::in_user_dictionary(&w.to_lowercase());
@@ -341,23 +380,25 @@ mod tests {
         assert_eq!(CHECK_FROM.with(Cell::get), None);
     }
 
-    /// Review follow-up (craft-libs#485): a word none of whose letters the dictionary uses is in
-    /// another script (a Cyrillic word in a Dutch run); a word sharing any letter is checked.
+    /// Review follow-up (craft-libs#485): a word with no letter in the dictionary's scripts is
+    /// in another script (a Cyrillic word in a Dutch run); a word in its script is always checked,
+    /// even with letters no dictionary word uses (CodeRabbit on #496: `zzzz`).
     #[test]
     fn words_in_another_script_are_not_the_dictionarys() {
         let nl = AffixDict::from_hunspell("SET UTF-8\n", "3\nhuis\nkat\nÉén\n", &[]).unwrap();
-        let a = alphabet(&nl);
-        assert_eq!(
-            &a[..],
-            ['a', 'h', 'i', 'k', 's', 't', 'u', 'é', 'n'].iter().copied().collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>()
-        );
-        for w in ["привет", "Привет", "αβγ", "שלום"] {
-            assert!(other_script(w, &a), "{w}");
+        let latin = scripts(&nl);
+        assert_eq!(latin.len(), 1);
+        for w in ["привет", "Привет", "αβγ", "שלום", "日本"] {
+            assert!(other_script(w, &latin), "{w}");
         }
-        for w in ["huus", "kät", "huisп", "ÉÉN"] {
-            assert!(!other_script(w, &a), "{w}");
+        for w in ["huus", "kät", "huisп", "ÉÉN", "zzzz", "qxqw", "ŋʒ"] {
+            assert!(!other_script(w, &latin), "{w}");
         }
-        assert!(!other_script("привет", &[]), "no alphabet: every word is checked");
+        assert!(!other_script("привет", &[]), "no scripts: every word is checked");
+        let ru = AffixDict::from_hunspell("SET UTF-8\n", "1\nдом\n", &[]).unwrap();
+        assert!(!other_script("щщщ", &scripts(&ru)) && other_script("dom", &scripts(&ru)));
+        assert_ne!(script_of('ა'), script_of('a'));
+        assert_eq!(script_of('ă'), script_of('Ạ'));
     }
 
     #[test]

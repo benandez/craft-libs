@@ -1723,6 +1723,7 @@ mod tests {
         packs::set_packs_dir(Some(root.clone()));
         let (nl, el) = (ProofLang::from_tag(Some("nl-NL")), ProofLang::from_tag(Some("el-GR")));
         assert!(is_correct_in("huis", nl) && !is_correct_in("huiss", nl));
+        assert!(!is_correct_in("zzzz", nl), "a misspelling in the dictionary's script, whatever its letters");
         assert!(is_correct_in("Пушкин", nl) && is_correct_in("σπίτι", nl));
         assert!(is_correct_in("σπίτι", el) && !is_correct_in("σπίτιι", el) && is_correct_in("huis", el));
         let text = "Пушкин huiss";
