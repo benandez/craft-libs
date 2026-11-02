@@ -1709,6 +1709,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Review follow-up (craft-libs#485): a word in another script than a pack language's
+    /// dictionary (a Russian name in a Dutch run, a Dutch word in a Greek one) isn't marked; a
+    /// misspelling in the dictionary's own script still is.
+    #[test]
+    fn pack_languages_leave_other_scripts_alone() {
+        crate::hold_dictionary_tests();
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let root = std::env::temp_dir().join(format!("wc-proof-other-script-packs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_pack(&root, "nl", &[("spelling.aff", b"SET UTF-8\n"), ("spelling.dic", "2\nhuis\nkat\n".as_bytes())]);
+        write_pack(&root, "el", &[("spelling.aff", b"SET UTF-8\n"), ("spelling.dic", "1\nσπίτι\n".as_bytes())]);
+        packs::set_packs_dir(Some(root.clone()));
+        let (nl, el) = (ProofLang::from_tag(Some("nl-NL")), ProofLang::from_tag(Some("el-GR")));
+        assert!(is_correct_in("huis", nl) && !is_correct_in("huiss", nl));
+        assert!(is_correct_in("Пушкин", nl) && is_correct_in("σπίτι", nl));
+        assert!(is_correct_in("σπίτι", el) && !is_correct_in("σπίτιι", el) && is_correct_in("huis", el));
+        let text = "Пушкин huiss";
+        let issues = check_text(text, &[(0..text.len(), nl)]);
+        assert_eq!(issues.iter().map(|i| &text[i.start..i.end]).collect::<Vec<_>>(), ["huiss"], "{issues:?}");
+        packs::set_packs_dir(None);
+        set_dictionaries_folder(Some(shared_test_folder()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The `.dic` file `lang`'s spelling is read from with the installed packs and `system` as the
     /// system's only dictionary folder.
     fn chosen_dictionary(lang: ProofLang, system: &std::path::Path) -> Option<std::path::PathBuf> {

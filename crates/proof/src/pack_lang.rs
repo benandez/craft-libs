@@ -6,6 +6,9 @@
 //! files); the one used least recently goes first, but never one used during the current
 //! [`in_one_check`] call, so a paragraph in many languages loads each dictionary once. Locales
 //! with no dictionary are remembered apart and take no room.
+//!
+//! A word none of whose letters the dictionary's words use (a Cyrillic word in a Dutch run) isn't
+//! this language's: it is never marked, as Word leaves a word in another script alone.
 
 use std::cell::Cell;
 use std::path::PathBuf;
@@ -20,8 +23,10 @@ use crate::lang::PackLocale;
 pub(crate) const MAX_LOADED_BYTES: u64 = 256 << 20;
 /// Estimated memory per byte of `.aff` and `.dic` file.
 const BYTES_PER_FILE_BYTE: u64 = 6;
-/// Most locales remembered as having no dictionary (the list is cleared when full).
+/// Most locales remembered as having no dictionary (the oldest is forgotten first when full).
 const MAX_MISSING: usize = 256;
+/// Most distinct letters kept in a dictionary's alphabet ([`alphabet`]).
+const MAX_ALPHABET: usize = 4096;
 
 /// The budget in force (tests lower it).
 static BUDGET: AtomicU64 = AtomicU64::new(MAX_LOADED_BYTES);
@@ -36,6 +41,8 @@ thread_local! {
 struct Loaded {
     locale: PackLocale,
     dict: Arc<AffixDict>,
+    /// The lowercase letters its words use ([`alphabet`]), sorted.
+    alphabet: Arc<[char]>,
     /// The `.dic` it came from.
     file: Option<PathBuf>,
     /// Estimated memory.
@@ -66,15 +73,48 @@ pub(crate) fn reload() {
 /// over the budget.
 pub(crate) fn in_one_check<R>(f: impl FnOnce() -> R) -> R {
     let outer = CHECK_FROM.with(Cell::get);
-    if outer.is_none() {
+    let _end = outer.is_none().then(|| {
         let now = CACHE.read().unwrap_or_else(PoisonError::into_inner).clock;
         CHECK_FROM.with(|c| c.set(Some(now.wrapping_add(1))));
-    }
-    let r = f();
-    if outer.is_none() {
+        EndCheck
+    });
+    f()
+}
+
+/// Ends the outermost [`in_one_check`] when dropped: also when `f` panics (`Session::run` catches
+/// it), or every dictionary would stay pinned on this thread and the budget never hold again.
+struct EndCheck;
+
+impl Drop for EndCheck {
+    fn drop(&mut self) {
         CHECK_FROM.with(|c| c.set(None));
     }
-    r
+}
+
+/// Remember that `locale` has no dictionary; when [`MAX_MISSING`] are remembered, the oldest is
+/// forgotten (clearing them all would look every other one up again).
+fn remember_missing(missing: &mut Vec<PackLocale>, locale: PackLocale) {
+    if missing.len() >= MAX_MISSING {
+        missing.remove(0);
+    }
+    missing.push(locale);
+}
+
+/// The lowercase letters the words of `d` use, sorted (at most [`MAX_ALPHABET`]).
+fn alphabet(d: &AffixDict) -> Arc<[char]> {
+    let mut seen = std::collections::BTreeSet::new();
+    for c in d.stems().flat_map(str::chars).filter(|c| c.is_alphabetic()).flat_map(char::to_lowercase) {
+        if seen.len() >= MAX_ALPHABET {
+            break;
+        }
+        seen.insert(c);
+    }
+    seen.into_iter().collect()
+}
+
+/// Is `word` in another script than `alphabet`'s words: none of its letters is in it?
+fn other_script(word: &str, alphabet: &[char]) -> bool {
+    !alphabet.is_empty() && !word.chars().filter(|c| c.is_alphabetic()).flat_map(char::to_lowercase).any(|c| alphabet.binary_search(&c).is_ok())
 }
 
 #[cfg(test)]
@@ -149,30 +189,34 @@ pub(crate) fn names(locale: PackLocale) -> Vec<String> {
 
 /// `locale`'s dictionary, loaded on first use; an empty one when there is none.
 fn get(locale: PackLocale) -> (Arc<AffixDict>, Option<PathBuf>) {
+    let (d, file, _) = get_with_alphabet(locale);
+    (d, file)
+}
+
+/// [`get`], with the dictionary's [`alphabet`].
+fn get_with_alphabet(locale: PackLocale) -> (Arc<AffixDict>, Option<PathBuf>, Arc<[char]>) {
     let reloads = {
         let mut c = CACHE.write().unwrap_or_else(PoisonError::into_inner);
         c.clock = c.clock.wrapping_add(1);
         let now = c.clock;
         if let Some(l) = c.loaded.iter_mut().find(|l| l.locale == locale) {
             l.used = now;
-            return (l.dict.clone(), l.file.clone());
+            return (l.dict.clone(), l.file.clone(), l.alphabet.clone());
         }
         if c.missing.contains(&locale) {
-            return (Arc::default(), None);
+            return (Arc::default(), None, Arc::from([]));
         }
         c.reloads
     };
     let (dict, file, bytes) = load(locale);
+    let alphabet = alphabet(&dict);
     let mut c = CACHE.write().unwrap_or_else(PoisonError::into_inner);
     if c.reloads != reloads || c.loaded.iter().any(|l| l.locale == locale) || c.missing.contains(&locale) {
-        return (dict, file);
+        return (dict, file, alphabet);
     }
     if dict.is_empty() {
-        if c.missing.len() >= MAX_MISSING {
-            c.missing.clear();
-        }
-        c.missing.push(locale);
-        return (dict, file);
+        remember_missing(&mut c.missing, locale);
+        return (dict, file, alphabet);
     }
     LOADS.fetch_add(1, Ordering::Relaxed);
     let budget = BUDGET.load(Ordering::Relaxed);
@@ -187,8 +231,8 @@ fn get(locale: PackLocale) -> (Arc<AffixDict>, Option<PathBuf>) {
         total = total.saturating_sub(gone.bytes);
     }
     let used = c.clock;
-    c.loaded.push(Loaded { locale, dict: dict.clone(), file: file.clone(), bytes, used });
-    (dict, file)
+    c.loaded.push(Loaded { locale, dict: dict.clone(), alphabet: alphabet.clone(), file: file.clone(), bytes, used });
+    (dict, file, alphabet)
 }
 
 /// Load `locale`'s dictionary, with its estimated memory.
@@ -229,11 +273,14 @@ pub(crate) fn load_error(locale: PackLocale) -> Option<String> {
 
 /// Is `word` right in `locale`? Every word is when there is no dictionary.
 pub(crate) fn is_correct(word: &str, locale: PackLocale, opts: &crate::Options) -> bool {
-    let (d, _) = get(locale);
+    let (d, _, alphabet) = get_with_alphabet(locale);
     if d.is_empty() {
         return true;
     }
     let Some(w) = crate::spelling::word_to_check_in(&d, word, opts) else { return true };
+    if other_script(w, &alphabet) {
+        return true;
+    }
     let known = |w: &str| d.check(w) || crate::in_user_dictionary(&w.to_lowercase());
     if w.contains('-') && !known(w) {
         return w.split('-').all(|p| p.chars().count() <= 1 || known(p));
@@ -262,6 +309,55 @@ mod tests {
 
     fn l(t: &str) -> PackLocale {
         PackLocale::new(t).unwrap()
+    }
+
+    /// Review follow-up (craft-libs#485): a full list of locales with no dictionary forgets its
+    /// oldest one, not all of them, so a document in more languages doesn't look every one up again.
+    #[test]
+    fn missing_locales_forget_the_oldest_first() {
+        let tag = |i: usize| l(&format!("q{}{}", (b'a' + (i / 26 % 26) as u8) as char, (b'a' + (i % 26) as u8) as char));
+        let mut missing = Vec::new();
+        for i in 0..MAX_MISSING + 10 {
+            remember_missing(&mut missing, tag(i));
+            assert!(missing.len() <= MAX_MISSING);
+        }
+        assert_eq!(missing.len(), MAX_MISSING);
+        assert!(!missing.contains(&tag(0)) && !missing.contains(&tag(9)), "the oldest went first");
+        assert!(missing.contains(&tag(10)) && missing.contains(&tag(MAX_MISSING + 9)), "the rest stay");
+    }
+
+    /// Review follow-up (craft-libs#485): a panic inside a check (caught by the app) doesn't leave
+    /// this thread's dictionaries pinned past the budget for good.
+    #[test]
+    fn a_panic_inside_a_check_ends_it() {
+        let caught = std::panic::catch_unwind(|| in_one_check(|| panic!("a bug inside a check")));
+        assert!(caught.is_err());
+        assert_eq!(CHECK_FROM.with(Cell::get), None);
+        in_one_check(|| {
+            assert!(CHECK_FROM.with(Cell::get).is_some());
+            in_one_check(|| ());
+            assert!(CHECK_FROM.with(Cell::get).is_some(), "an inner check doesn't end the outer one");
+        });
+        assert_eq!(CHECK_FROM.with(Cell::get), None);
+    }
+
+    /// Review follow-up (craft-libs#485): a word none of whose letters the dictionary uses is in
+    /// another script (a Cyrillic word in a Dutch run); a word sharing any letter is checked.
+    #[test]
+    fn words_in_another_script_are_not_the_dictionarys() {
+        let nl = AffixDict::from_hunspell("SET UTF-8\n", "3\nhuis\nkat\nÉén\n", &[]).unwrap();
+        let a = alphabet(&nl);
+        assert_eq!(
+            &a[..],
+            ['a', 'h', 'i', 'k', 's', 't', 'u', 'é', 'n'].iter().copied().collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>()
+        );
+        for w in ["привет", "Привет", "αβγ", "שלום"] {
+            assert!(other_script(w, &a), "{w}");
+        }
+        for w in ["huus", "kät", "huisп", "ÉÉN"] {
+            assert!(!other_script(w, &a), "{w}");
+        }
+        assert!(!other_script("привет", &[]), "no alphabet: every word is checked");
     }
 
     #[test]
