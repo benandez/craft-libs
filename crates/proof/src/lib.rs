@@ -340,7 +340,7 @@ pub fn installed_dictionaries() -> Vec<(ProofLang, Option<std::path::PathBuf>)> 
 /// checked yet reports `None` (#2830). For an English, its embedded SCOWL dictionary or the
 /// English Hunspell dictionary that failed; English then uses the next source ([`english_source`]).
 pub fn dictionary_load_error(lang: ProofLang) -> Option<String> {
-    if matches!(lang, ProofLang::En | ProofLang::EnGb | ProofLang::EnCa) {
+    if lang.is_english() {
         return english::load_error(lang);
     }
     if let Some(l) = lang.spelling_locale() {
@@ -953,7 +953,7 @@ pub fn check_grammar_in(text: &str, lang: ProofLang) -> Vec<Issue> {
 fn grammar_in(text: &str, lang: ProofLang, capital_first: bool) -> Vec<Issue> {
     match lang {
         ProofLang::En => grammar_en(text, capital_first),
-        ProofLang::EnGb | ProofLang::EnCa => grammar_en(text, capital_first).into_iter().map(|i| Issue { lang, ..i }).collect(),
+        ProofLang::EnGb | ProofLang::EnAu | ProofLang::EnCa => grammar_en(text, capital_first).into_iter().map(|i| Issue { lang, ..i }).collect(),
         // `pt-pt` shares Portuguese's rules, its issues in its own language.
         _ => language(lang.built_in())
             .map_or_else(Vec::new, |l| (l.grammar)(text, lang, capital_first).into_iter().map(|i| Issue { lang, ..i }).collect()),
@@ -1197,7 +1197,7 @@ mod tests {
         }
         // Every proofed language other than English has a Hunspell dictionary to report.
         for l in ProofLang::PROOFED {
-            let english = matches!(l, ProofLang::En | ProofLang::EnGb | ProofLang::EnCa);
+            let english = l.is_english();
             assert_eq!(dictionary_needed(l, false).is_some(), !english, "{l:?}");
         }
         for l in [ProofLang::En, ProofLang::Other] {
@@ -2481,6 +2481,33 @@ mod tests {
         }
     }
 
+    /// Review follow-up: Australian English reads SCOWL's own en-AU dictionary (craft-i18n ships
+    /// it), not en-GB's: its Australian words are right and spelled as Hunspell's en_AU spells
+    /// them; British English doesn't take them. The British policy still applies: American
+    /// spellings are wrong, `-ise` and `-ize` both right.
+    #[cfg_attr(not(craft_proof_data), ignore = "needs the Language data (CRAFT_I18N_DIR)")]
+    #[test]
+    fn australian_english_reads_its_own_scowl() {
+        crate::hold_dictionary_tests();
+        let (au, gb) = (ProofLang::EnAu, ProofLang::EnGb);
+        assert!(scowl::is_british(au));
+        assert_eq!(english_source(au), Some(EnglishSource::Embedded));
+        for w in ["billabong", "brumby", "larrikinism", "bunyip", "corroboree", "Bundaberg", "Rockhampton"] {
+            assert!(is_correct_in(w, au), "en-AU: {w}");
+            assert!(!is_correct_in(w, gb), "en-GB: {w}");
+            assert!(is_correct_for(w, Some("en-AU")), "en-AU tag: {w}");
+        }
+        for w in ["colour", "centre", "organise", "organize", "analyse", "travelled", "defence"] {
+            assert!(is_correct_in(w, au), "en-AU: {w}");
+        }
+        for w in ["color", "center", "analyze", "reanalyze", "defense"] {
+            assert!(!is_correct_in(w, au), "en-AU: {w}");
+        }
+        let text = "The larrikin saw a brumby by the billabong and analysed the colour of the sky.";
+        assert!(check_spelling_in(text, au).is_empty(), "{:?}", check_spelling_in(text, au));
+        assert_eq!(check_spelling_in(text, gb).len(), 3, "larrikin, brumby, billabong: {:?}", check_spelling_in(text, gb));
+    }
+
     /// More British spellings that must stay right in en-GB and en-AU (#1281): -re, single l, ae,
     /// with their inflections.
     #[test]
@@ -2488,7 +2515,7 @@ mod tests {
         // English results depend on the dictionaries other tests install.
         crate::hold_dictionary_tests();
         let gb = ProofLang::EnGb;
-        assert_eq!(ProofLang::from_tag(Some("en-AU")), gb);
+        assert_eq!(ProofLang::from_tag(Some("en-AU")), ProofLang::EnAu);
         for w in [
             "goitre",
             "goitres",
@@ -2513,6 +2540,7 @@ mod tests {
             "encyclopaedias",
         ] {
             assert!(is_correct_in(w, gb), "en-GB: {w}");
+            assert!(is_correct_in(w, ProofLang::EnAu), "en-AU: {w}");
         }
         let text = "The wilful knight took the sceptre to fulfil his enrolment, paid the instalment and read the encyclopaedia.";
         assert!(check_spelling_in(text, gb).is_empty(), "{:?}", check_spelling_in(text, gb));
@@ -2529,7 +2557,8 @@ mod tests {
             assert_eq!(english_source(l), Some(EnglishSource::Embedded));
             assert_eq!(dictionary_load_error(l), None);
         }
-        assert!(std::ptr::eq(scowl::dict(ProofLang::EnGb).unwrap(), scowl::dict(ProofLang::from_tag(Some("en-AU"))).unwrap()), "en-AU reads en-GB");
+        assert!(!std::ptr::eq(scowl::dict(ProofLang::EnGb).unwrap(), scowl::dict(ProofLang::EnAu).unwrap()), "en-AU reads its own");
+        assert!(std::ptr::eq(scowl::dict(ProofLang::EnGb).unwrap(), scowl::dict(ProofLang::from_tag(Some("en-NZ"))).unwrap()), "en-NZ reads en-GB");
         let notice = scowl::notice().unwrap();
         for credit in ["Kevin Atkinson", "Geoff Kuenning", "clause 4 removed", "Benjamin Titze"] {
             assert!(notice.contains(credit), "{credit}");

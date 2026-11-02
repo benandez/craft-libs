@@ -2,8 +2,11 @@
 //! dictionaries of craft-i18n's `language-data/en-us`, `en-gb` (British `-ise`) and `en-ca`,
 //! embedded unmodified at build time and read by the affix engine ([`crate::affix`]) on first use.
 //!
-//! Each English has its own: American English reads en-US, the British-spelling Englishes
-//! (en-GB, en-AU, en-NZ, en-IE…) read en-GB and Canadian English reads en-CA. Its suggestions
+//! Each English has its own: American English reads en-US, Australian English en-AU (SCOWL's
+//! Australian words: `billabong`, `brumby`; and `program`, `inquiry`), the other British-spelling
+//! Englishes (en-GB, en-NZ, en-IE…) read en-GB and Canadian English reads en-CA. SCOWL has no
+//! en-NZ: New Zealand English keeps `programme` and has few words of its own in SCOWL's en-AU
+//! data, so it stays on en-GB. Its suggestions
 //! come from its own dictionary, and a word is right when its own dictionary knows it: the other
 //! dialects' dictionaries are never asked (en-US would take `colourblind` from en-GB's). SCOWL
 //! picks one spelling per dialect (en-GB `-ise` has no `organize`, en-US no `judgement`), and Word
@@ -19,16 +22,17 @@ use std::sync::OnceLock;
 
 use crate::ProofLang;
 use crate::affix::AffixDict;
-use crate::data::{EN_CA_AFF, EN_CA_SPELLING, EN_GB_AFF, EN_GB_SPELLING, EN_US_AFF, EN_US_SPELLING, SCOWL_NOTICE};
+use crate::data::{EN_AU_AFF, EN_AU_SPELLING, EN_CA_AFF, EN_CA_SPELLING, EN_GB_AFF, EN_GB_SPELLING, EN_US_AFF, EN_US_SPELLING, SCOWL_NOTICE};
 
-/// Per English (American, British, Canadian): the loaded dictionary, or why it isn't there.
-static DICTS: [OnceLock<Result<AffixDict, String>>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+/// Per English (American, British, Canadian, Australian): the loaded dictionary, or why it isn't there.
+static DICTS: [OnceLock<Result<AffixDict, String>>; 4] = [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
 
 /// The slot, `.aff` and `.dic` text of `lang`'s dictionary.
 fn source(lang: ProofLang) -> (usize, &'static str, &'static str) {
     match lang {
         ProofLang::EnGb => (1, EN_GB_AFF, EN_GB_SPELLING),
         ProofLang::EnCa => (2, EN_CA_AFF, EN_CA_SPELLING),
+        ProofLang::EnAu => (3, EN_AU_AFF, EN_AU_SPELLING),
         _ => (0, EN_US_AFF, EN_US_SPELLING),
     }
 }
@@ -50,9 +54,9 @@ pub(crate) fn dict(lang: ProofLang) -> Option<&'static AffixDict> {
     loaded.as_ref().ok()
 }
 
-/// Does `lang` read the British `-ise` dictionary (en-GB, en-AU, en-NZ…)?
+/// Does `lang` read a British `-ise` dictionary (en-GB, and en-NZ… through it; en-AU)?
 pub(crate) fn is_british(lang: ProofLang) -> bool {
-    source(lang).0 == 1
+    matches!(source(lang).0, 1 | 3)
 }
 
 /// Why `lang`'s embedded SCOWL dictionary failed to load, once something tried to load it.

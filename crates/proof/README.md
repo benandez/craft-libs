@@ -13,7 +13,7 @@ craft-proof = { git = "https://github.com/storytold/craft-libs", rev = "<commit>
 
 | Language | Spelling | Grammar | Hyphenation |
 |---|---|---|---|
-| English (en-US, en-CA, en-GB and the British-spelling Englishes such as en-AU, en-NZ) | SCOWL 2026 Hunspell dictionary per English + `en-extra.txt`, dialect policy (`en-variants.txt`); a dictionaries-folder English first; without SCOWL the installed Hunspell English, else the built-in Moby list ([below](#english-is-always-checked)) | yes | Moby list, our patterns, heuristic |
+| English (en-US, en-CA, en-AU, en-GB and the British-spelling Englishes such as en-NZ) | SCOWL 2026 Hunspell dictionary per English + `en-extra.txt`, dialect policy (`en-variants.txt`); a dictionaries-folder English first; without SCOWL the installed Hunspell English, else the built-in Moby list ([below](#english-is-always-checked)) | yes | Moby list, our patterns, heuristic |
 | Polish, Portuguese, Italian | the installed Hunspell dictionary | yes | TeX patterns (embedded, or a Language pack) |
 | Croatian, Turkish, Russian, Czech, Indonesian, Spanish (es, es-MX, es-419, es-UY) | the installed Hunspell dictionary (Russian also `ru-extra.txt`) | yes | Turkish and Russian rules; English fallback otherwise |
 | German | — | — | TeX patterns (embedded, or a Language pack) |
@@ -151,14 +151,15 @@ English spelling uses the first of these that is there; `english_source(lang)` s
    or in WordCraft's own `dictionaries` folder. The user's choice comes first.
 2. **Installed English pack:** reserved for Language packs (craft-libs#485, CP4.2).
 3. **Embedded SCOWL:** the English's own SCOWL `rel-2026.02.25` Hunspell dictionary from
-   `CRAFT_I18N_DIR` (`language-data/en-us`, `en-gb` (British `-ise`) or `en-ca`, `spelling.aff` +
-   `spelling.dic`), read by the affix engine. en-AU, en-NZ, en-IE and the other British-spelling
-   Englishes read en-GB; Canadian English reads en-CA. A word is right when the English's own
+   `CRAFT_I18N_DIR` (`language-data/en-us`, `en-gb` (British `-ise`), `en-au` or `en-ca`,
+   `spelling.aff` + `spelling.dic`), read by the affix engine. Australian English reads en-AU
+   (Australian words such as `billabong`, with en-GB's spelling policy); en-NZ, en-IE and the
+   other British-spelling Englishes read en-GB; Canadian English reads en-CA. A word is right when the English's own
    dictionary knows it (or `en-extra.txt` does), never because another English's does
    (`colourblind` is wrong in en-US, `colorblind` in en-GB); suggestions come from the same
    dictionary. SCOWL's size-60 lists keep one spelling per dialect, and Word accepts more, so
    British English also takes the `-ize` spellings of its `-ise` words that American or Canadian
-   English spell so (`organize`, `realization`; never `wize` or `advize`), and `en-variants.txt` flags the other dialect's spellings and accepts this
+   English spell so (`organize`, `realization`; never `wize` or `advize`, and never `-yze`: `reanalyze` stays American), and `en-variants.txt` flags the other dialect's spellings and accepts this
    dialect's other spellings of known words (`judgement` in en-US). English with no dialect
    (`is_correct`) takes a word any of the three knows. Suggestions offer a missing space only
    between two lower-case words of three letters or more, after every one-word candidate, and no

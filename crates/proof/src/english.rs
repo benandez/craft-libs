@@ -4,7 +4,7 @@
 //!    user keeps for WordCraft ([`crate::hunspell::user_dirs`]: the folder set in the options,
 //!    `WORDCRAFT_DICTIONARIES`, WordCraft's own `dictionaries` folder).
 //! 2. **Installed English pack**: reserved for Language packs (craft-libs#485, CP4.2).
-//! 3. **Embedded SCOWL**: the run's English's SCOWL dictionary (en-US, en-GB or en-CA) embedded
+//! 3. **Embedded SCOWL**: the run's English's SCOWL dictionary (en-US, en-GB, en-AU or en-CA) embedded
 //!    from craft-i18n at build time ([`crate::scowl`]); a word it knows (British English: also
 //!    the `-ize` spelling of one it knows, [`ise_spelling`]), or the supplement ([`EXTRA`]), is
 //!    right; never one only another English knows. When it is there, the system locations aren't
@@ -18,8 +18,9 @@
 //!    embedded from craft-i18n is the same list; it is used for hyphenation only.)
 //!
 //! Hunspell dictionaries are found by [`crate::hunspell`] by their own English's names only
-//! (`en_US` for American, `en_GB` for British, `en_CA` for Canadian English), each name in every
-//! folder before the next name. Another English's dictionary is never used: it would mark this
+//! (`en_US` for American, `en_GB` for British, `en_CA` for Canadian English; `en_AU`, then
+//! `en_GB`, for Australian), each name in every folder before the next name. Another English's
+//! dictionary is never used: it would mark this
 //! English's spellings (`colour` in an `en_US` one). A file that can't be read is skipped for the
 //! next name or folder, and one file is read once for every English that uses it. `COMPOUNDRULE`
 //! (ordinals) and `OCONV` (suggestions are written as the dictionary says: `don’t`) are read;
@@ -90,15 +91,22 @@ fn names(lang: ProofLang) -> &'static [&'static str] {
     match lang {
         ProofLang::EnGb => &["en_GB", "en-GB"],
         ProofLang::EnCa => &["en_CA", "en-CA"],
+        // Australian English's own, else a British one: the British-spelling dictionary it read
+        // before it had its own (a system en_GB on a build without SCOWL).
+        ProofLang::EnAu => &["en_AU", "en-AU", "en_GB", "en-GB"],
         _ => &["en_US", "en-US"],
     }
 }
+
+/// How many Englishes have a slot of their own ([`slot`]).
+const ENGLISHES: usize = 4;
 
 /// The slot of each English in [`State::slots`].
 fn slot(lang: ProofLang) -> usize {
     match lang {
         ProofLang::EnGb => 1,
         ProofLang::EnCa => 2,
+        ProofLang::EnAu => 3,
         _ => 0,
     }
 }
@@ -109,7 +117,7 @@ type Loaded = Option<(Arc<AffixDict>, PathBuf)>;
 /// The English Hunspell dictionaries, under one lock.
 struct State {
     /// Per English (see [`slot`]): `None` until first use, then what was found.
-    slots: [Option<Loaded>; 3],
+    slots: [Option<Loaded>; ENGLISHES],
     /// Every `.dic` file read, so Englishes that use the same file share one copy.
     files: Vec<(PathBuf, Arc<AffixDict>)>,
     /// Counts reloads, so a load that started before one is not kept.
@@ -118,7 +126,7 @@ struct State {
 
 impl State {
     const fn new() -> Self {
-        State { slots: [None, None, None], files: Vec::new(), reloads: 0 }
+        State { slots: [None, None, None, None], files: Vec::new(), reloads: 0 }
     }
 }
 
@@ -181,7 +189,7 @@ fn already_read(state: &RwLock<State>, dic: &Path) -> Option<Arc<AffixDict>> {
 /// Forget what `state` holds, so the next check looks again.
 fn forget(state: &RwLock<State>) {
     let mut s = state.write().unwrap_or_else(PoisonError::into_inner);
-    s.slots = [None, None, None];
+    s.slots = [None, None, None, None];
     s.files.clear();
     s.reloads = s.reloads.wrapping_add(1);
 }
@@ -240,7 +248,7 @@ fn note_error(lang: ProofLang, error: Option<(PathBuf, String)>) {
 /// folder changed).
 pub(crate) fn reload() {
     forget(&HUNSPELL);
-    for lang in [ProofLang::En, ProofLang::EnGb, ProofLang::EnCa] {
+    for lang in [ProofLang::En, ProofLang::EnGb, ProofLang::EnCa, ProofLang::EnAu] {
         crate::hunspell::clear_load_error(key(lang));
     }
 }
@@ -609,7 +617,7 @@ mod tests {
     fn lookup_order() {
         let tiny = Arc::new(AffixDict::from_hunspell("", "1\nzzyzx\n", &[]).unwrap());
         let file = PathBuf::from("/folder/en_US.dic");
-        for lang in [ProofLang::En, ProofLang::EnGb, ProofLang::EnCa] {
+        for lang in [ProofLang::En, ProofLang::EnGb, ProofLang::EnAu, ProofLang::EnCa] {
             assert!(matches!(pick(Some((tiny.clone(), file.clone())), lang), Speller::Hunspell(_, p) if p == file), "{lang:?}");
             let fallback = pick(None, lang);
             if crate::scowl::dict(lang).is_some() {
@@ -638,6 +646,11 @@ mod tests {
         assert_eq!(found(names(ProofLang::EnGb)), ["en_GB"], "a user's en_US doesn't stand in for SCOWL's en-GB");
         assert_eq!(found(names(ProofLang::EnCa)), ["en_CA"]);
         assert_eq!(found(names(ProofLang::En)), ["en_US"]);
+        // Australian English: its own, else the British one it read before it had its own.
+        assert_eq!(found(names(ProofLang::EnAu)), ["en_GB"]);
+        std::fs::write(dir.join("en_AU.aff"), "SET UTF-8\n").unwrap();
+        std::fs::write(dir.join("en_AU.dic"), "1\nzzyzx\n").unwrap();
+        assert_eq!(found(names(ProofLang::EnAu)), ["en_AU", "en_GB"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
