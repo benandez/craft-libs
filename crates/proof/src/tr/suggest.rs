@@ -70,7 +70,7 @@ pub fn suggest_with(d: &TrDict, word: &str, max: usize) -> Vec<String> {
     // 1. Check direct common replacement table
     for &(wrong, right) in COMMON_REPLACEMENTS {
         if lower == wrong && seen.insert(right.to_string()) {
-            suggestions.push(right.to_string());
+            suggestions.push(match_casing(word, right));
             if suggestions.len() >= max {
                 return suggestions;
             }
@@ -270,7 +270,8 @@ pub fn turkish_to_upper(s: &str) -> String {
 
 /// Match original casing on suggestion.
 fn match_casing(orig: &str, cand: &str) -> String {
-    if orig.chars().all(char::is_uppercase) {
+    let mut letters = orig.chars().filter(|c| c.is_alphabetic()).peekable();
+    if letters.peek().is_some() && letters.all(char::is_uppercase) {
         turkish_to_upper(cand)
     } else if orig.chars().next().is_some_and(char::is_uppercase) {
         super::grammar::turkish_capitalize(cand)
@@ -329,7 +330,10 @@ mod tests {
     fn two_words_get_only_the_tables_replacement() {
         let d = TrDict::from_hunspell("SET UTF-8\n", "2\nbirkaç\nsonra\n").unwrap();
         assert_eq!(suggest_with(&d, "bir kaç", 3), vec!["birkaç".to_string()]);
-        assert_eq!(suggest_with(&d, "Bir kaç", 3), vec!["birkaç".to_string()]);
+        // craft-libs#487 review: the table keeps the word's case.
+        assert_eq!(suggest_with(&d, "Bir kaç", 3), vec!["Birkaç".to_string()]);
+        assert_eq!(suggest_with(&d, "BİR KAÇ", 3), vec!["BİRKAÇ".to_string()]);
+        assert_eq!(suggest_with(&d, "Herşey", 3), vec!["Her şey".to_string()]);
         assert!(suggest_with(&d, "sorna sorna", 3).is_empty());
     }
 

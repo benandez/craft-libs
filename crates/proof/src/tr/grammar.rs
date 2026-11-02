@@ -128,7 +128,7 @@ const ABBREVIATIONS: &[&str] = &[
 const CONJUNCTIONS_NO_PRE_COMMA: &[&str] = &["ve", "veya", "yahut", "velev", "veyahut", "de", "da"];
 
 /// Conjunctions that must not be followed by a comma.
-const CONJUNCTIONS_NO_POST_COMMA: &[&str] = &["ve", "veya", "yahut", "veyahut", "hem", "ne", "ya", "gerek", "ister", "de", "da"];
+const CONJUNCTIONS_NO_POST_COMMA: &[&str] = &["ve", "veya", "yahut", "veyahut", "hem", "gerek", "ister"];
 
 /// Check grammar and punctuation in a Turkish text block.
 pub fn check(text: &str) -> Vec<Issue> {
@@ -154,7 +154,7 @@ pub fn check_with(text: &str, capital_first: bool) -> Vec<Issue> {
         let only_spaces = gap.chars().all(|c| c == ' ' || c == '\t');
         let lower1 = w1.to_lowercase();
         let lower2 = w2.to_lowercase();
-        if only_spaces && lower1 == lower2 && !ALLOWED_REPEATS.contains(&lower1.as_str()) {
+        if only_spaces && w1.chars().all(char::is_alphabetic) && lower1 == lower2 && !ALLOWED_REPEATS.contains(&lower1.as_str()) {
             v.push(Issue {
                 start: pair[1].0,
                 end: pair[1].1,
@@ -395,10 +395,27 @@ mod tests {
         assert_eq!(issues.len(), 1);
         assert!(issues[0].message.contains("virgül konulmaz"));
 
-        let text2 = "Bana kalırsa bu mesele de, haklı olan taraf bizdik.";
+        let text2 = "Elma ve, armut.";
         let issues2 = check(text2);
         assert_eq!(issues2.len(), 1);
-        assert!(issues2[0].message.contains("'de' bağlacından sonra virgül konulmaz"));
+        assert!(issues2[0].message.contains("'ve' bağlacından sonra virgül konulmaz"));
+    }
+
+    /// `de`/`da`, `ne` and `ya` often take a comma after them in correct Turkish, so no mark
+    /// (craft-libs#488 review).
+    #[test]
+    fn a_comma_after_de_ne_or_ya_is_fine() {
+        for text in ["Ali de, Veli de geldi.", "Ne, sen mi geldin?", "Ya, bilmiyorum.", "Bu mesele de, haklı olan bizdik."] {
+            assert!(check(text).is_empty(), "{text}: {:?}", check(text));
+        }
+    }
+
+    /// Repeated numbers are not repeated words (craft-libs#488 review).
+    #[test]
+    fn repeated_numbers_are_not_flagged() {
+        for text in ["Skor 1 1 bitti.", "Toplam 100 100 değil.", "Oda A1 A1 değil."] {
+            assert!(check(text).is_empty(), "{text}: {:?}", check(text));
+        }
     }
 
     #[test]
